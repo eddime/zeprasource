@@ -17,14 +17,6 @@ export const useMigrationStore = defineStore("migration", () => {
 	const running = ref(false);
 	const resuming = ref(false);
 
-	/** @deprecated use focusedId — kept for gradual migration of views */
-	const activeId = computed({
-		get: () => focusedId.value,
-		set: (id: string | null) => {
-			focusedId.value = id;
-		},
-	});
-
 	const focusedProgress = computed(() => {
 		const id = focusedId.value;
 		if (!id) return null;
@@ -236,7 +228,6 @@ export const useMigrationStore = defineStore("migration", () => {
 
 	return {
 		focusedId,
-		activeId,
 		progressById,
 		progress,
 		focusedProgress,
@@ -259,7 +250,5 @@ export const useMigrationStore = defineStore("migration", () => {
 		start,
 		cancel,
 		pause,
-		/** @deprecated use resetFocused */
-		reset: resetFocused,
 	};
 });
