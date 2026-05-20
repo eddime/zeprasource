@@ -90,8 +90,7 @@ let db: Database | null = null;
 export function getDatabase(): Database {
 	if (db) return db;
 
-	const dataDir =
-		process.env.ZEPRA_DATA_DIR?.trim() || Utils.paths.userData;
+	const dataDir = getDataDirectory();
 	if (!existsSync(dataDir)) {
 		mkdirSync(dataDir, { recursive: true });
 	}
@@ -112,8 +111,12 @@ export function getDatabase(): Database {
 	return db;
 }
 
+export function getDataDirectory(): string {
+	return process.env.ZEPRA_DATA_DIR?.trim() || Utils.paths.userData;
+}
+
 export function getDatabasePath(): string {
-	return join(Utils.paths.userData, "mailport.db");
+	return join(getDataDirectory(), "mailport.db");
 }
 
 export function saveSettings(settings: AppSettings): void {

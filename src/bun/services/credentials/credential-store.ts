@@ -1,7 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { Utils } from "electrobun/bun";
+import { getDataDirectory } from "../../db/database";
 
 const ALGORITHM = "aes-256-gcm";
 const KEY_LENGTH = 32;
@@ -11,19 +11,24 @@ const KEY_LENGTH = 32;
  * OS keychain integration can replace storeSecret/retrieveSecret without API changes.
  */
 class CredentialStore {
-	private readonly vaultPath: string;
 	private key: Buffer | null = null;
+	private keyDataDir: string | null = null;
 
-	constructor() {
-		const dir = join(Utils.paths.userData, "vault");
+	private getVaultDir(): string {
+		const dir = join(getDataDirectory(), "vault");
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-		this.vaultPath = join(dir, "credentials.json");
+		return dir;
+	}
+
+	private getVaultPath(): string {
+		return join(this.getVaultDir(), "credentials.json");
 	}
 
 	private getKey(): Buffer {
-		if (this.key) return this.key;
+		const dataDir = getDataDirectory();
+		if (this.key && this.keyDataDir === dataDir) return this.key;
 
-		const saltPath = join(Utils.paths.userData, "vault", ".salt");
+		const saltPath = join(this.getVaultDir(), ".salt");
 		let salt: Buffer;
 		if (existsSync(saltPath)) {
 			salt = readFileSync(saltPath);
@@ -32,22 +37,24 @@ class CredentialStore {
 			writeFileSync(saltPath, salt);
 		}
 
-		const machineId = `${process.platform}-${Utils.paths.userData}`;
+		const machineId = `${process.platform}-${dataDir}`;
 		this.key = scryptSync(machineId, salt, KEY_LENGTH);
+		this.keyDataDir = dataDir;
 		return this.key;
 	}
 
 	private readVault(): Record<string, string> {
-		if (!existsSync(this.vaultPath)) return {};
+		const vaultPath = this.getVaultPath();
+		if (!existsSync(vaultPath)) return {};
 		try {
-			return JSON.parse(readFileSync(this.vaultPath, "utf8")) as Record<string, string>;
+			return JSON.parse(readFileSync(vaultPath, "utf8")) as Record<string, string>;
 		} catch {
 			return {};
 		}
 	}
 
 	private writeVault(data: Record<string, string>): void {
-		writeFileSync(this.vaultPath, JSON.stringify(data, null, 2), { mode: 0o600 });
+		writeFileSync(this.getVaultPath(), JSON.stringify(data, null, 2), { mode: 0o600 });
 	}
 
 	store(ref: string, secret: string): void {
