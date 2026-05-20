@@ -1,0 +1,26 @@
+# Two local IMAP servers for manual / scripted generic migration tests.
+# Start: docker compose -f docker-compose.test-imap.yml up
+#
+# Source: localhost:1143  user source@test  pass source
+# Dest:   localhost:2143  user dest@test    pass dest
+
+services:
+  imap-source:
+    image: greenmail/standalone:2.1.8
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.imap.hostname=0.0.0.0
+        -Dgreenmail.imap.port=1143
+        -Dgreenmail.auth.disabled
+    ports:
+      - "1143:1143"
+
+  imap-dest:
+    image: greenmail/standalone:2.1.8
+    environment:
+      GREENMAIL_OPTS: >-
+        -Dgreenmail.imap.hostname=0.0.0.0
+        -Dgreenmail.imap.port=2143
+        -Dgreenmail.auth.disabled
+    ports:
+      - "2143:2143"

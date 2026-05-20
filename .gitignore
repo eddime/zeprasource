@@ -1,0 +1,7 @@
+.env
+.test-fixtures/
+node_modules/
+build/
+dist/
+artifacts/
+*.tsbuildinfo

@@ -1,0 +1,42 @@
+{
+	"name": "mailport",
+	"version": "0.1.0",
+	"type": "module",
+	"description": "Privacy-focused local-first IMAP email migration for desktop",
+	"scripts": {
+		"start": "vite build && electrobun dev",
+		"dev": "bun run dev:hmr",
+		"dev:hmr": "concurrently -k -n vite,electrobun -c cyan,magenta \"bun run hmr\" \"bun scripts/dev-electrobun.ts\"",
+		"hmr": "vite",
+		"dev:ui": "vite",
+		"dev:bun": "electrobun dev --watch",
+		"build:ui": "vite build",
+		"build:canary": "vite build && electrobun build --env=canary",
+		"typecheck": "vue-tsc --noEmit",
+		"test": "bun test src/bun",
+		"test:generic": "bun run scripts/test-generic-migration.ts",
+		"test:generic:local": "bun run scripts/test-generic-migration-local.ts",
+		"imap:up": "bun run scripts/start-local-imap-servers.ts",
+		"imap:down": "bun run scripts/stop-local-imap-servers.ts"
+	},
+	"dependencies": {
+		"electrobun": "1.18.1",
+		"imapflow": "1.3.3",
+		"pinia": "3.0.4",
+		"vue": "3.5.34",
+		"vue-router": "5.0.7"
+	},
+	"devDependencies": {
+		"@tailwindcss/vite": "4.3.0",
+		"@types/bun": "latest",
+		"@types/node": "25.9.0",
+		"@types/nodemailer": "^8.0.0",
+		"@vitejs/plugin-vue": "5.2.4",
+		"concurrently": "9.2.1",
+		"nodemailer": "^8.0.7",
+		"tailwindcss": "4.3.0",
+		"typescript": "5.9.3",
+		"vite": "6.4.2",
+		"vue-tsc": "2.2.12"
+	}
+}
