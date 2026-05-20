@@ -177,7 +177,13 @@ export const useMigrationStore = defineStore("migration", () => {
 		return true;
 	}
 
-	async function start(explicitResumeId?: string) {
+	async function start(
+		explicitResumeId?: string,
+		options?: {
+			plannedSecondsTypical?: number;
+			launchTicket?: string;
+		},
+	) {
 		const rpc = getRpc();
 		const resumeId =
 			explicitResumeId ??
@@ -197,6 +203,8 @@ export const useMigrationStore = defineStore("migration", () => {
 						source: mailboxes.source,
 						destination: mailboxes.destination,
 						folderMappings: mailboxes.folderMappings.filter((f) => f.selected),
+						plannedSecondsTypical: options?.plannedSecondsTypical,
+						launchTicket: options?.launchTicket,
 					});
 
 			focusedId.value = migrationId;

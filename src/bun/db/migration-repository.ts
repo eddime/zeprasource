@@ -257,6 +257,27 @@ export function refreshMigrationMessagesTotal(migrationId: string): number {
 	return total;
 }
 
+export function listFailedUidsForFolder(
+	migrationId: string,
+	sourcePath: string,
+): number[] {
+	const database = getDatabase();
+	const rows = database
+		.query(
+			`SELECT source_uid FROM migration_messages
+       WHERE migration_id = ?
+         AND status = 'failed'
+         AND (source_folder_hash = ? OR source_folder = ?)
+       ORDER BY source_uid`,
+		)
+		.all(
+			migrationId,
+			hashString(`migration-message-folder:${migrationId}`, sourcePath),
+			sourcePath,
+		) as Array<{ source_uid: number }>;
+	return rows.map((row) => row.source_uid);
+}
+
 export function incrementMigrationCounters(
 	migrationId: string,
 	delta: { completed?: number; failed?: number; bytes?: number },

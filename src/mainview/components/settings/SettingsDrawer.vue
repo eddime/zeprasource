@@ -1,22 +1,11 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
 import { useSettingsStore } from "../../stores/settings";
 
 const open = defineModel<boolean>("open", { default: false });
 const settings = useSettingsStore();
-const speed = ref<"balanced" | "fast">("balanced");
-
-watch(open, (v) => {
-	if (!v) return;
-	speed.value = settings.settings.parallelConnections >= 4 ? "fast" : "balanced";
-});
 
 function close() {
 	open.value = false;
-}
-
-function applySpeed() {
-	void settings.save({ parallelConnections: speed.value === "fast" ? 5 : 2 });
 }
 </script>
 
@@ -31,21 +20,27 @@ function applySpeed() {
 				<h2>Settings</h2>
 
 				<label class="row">
-					<span>IMAP lanes</span>
-					<select v-model="speed" @change="applySpeed">
-						<option value="balanced">Balanced (2)</option>
-						<option value="fast">Fast (5)</option>
+					<span>Appearance</span>
+					<select
+						:value="settings.settings.theme"
+						@change="
+							settings.save({
+								theme: ($event.target as HTMLSelectElement).value as
+									| 'system'
+									| 'light'
+									| 'dark',
+							})
+						"
+					>
+						<option value="system">System</option>
+						<option value="light">Light</option>
+						<option value="dark">Dark</option>
 					</select>
 				</label>
 
-				<label class="check">
-					<input
-						v-model="settings.settings.skipDuplicates"
-						type="checkbox"
-						@change="settings.save({ skipDuplicates: settings.settings.skipDuplicates })"
-					/>
-					Skip duplicates
-				</label>
+				<p class="hint">
+					Migration speed, retries, and duplicates are handled automatically — nothing to tune.
+				</p>
 			</aside>
 		</Transition>
 	</Teleport>
@@ -102,12 +97,11 @@ select {
 	border: 1px solid var(--border);
 	background: var(--bg);
 }
-.check {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-	font-size: 0.875rem;
-	cursor: pointer;
+.hint {
+	margin: 0.5rem 0 0;
+	font-size: 0.8rem;
+	color: var(--muted);
+	line-height: 1.45;
 }
 .fade-enter-active,
 .fade-leave-active {

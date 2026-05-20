@@ -11,6 +11,12 @@ import type {
 	MigrationSizeEstimate,
 	DestinationQuotaCheck,
 } from "../../shared/types";
+import type {
+	MigrationCheckoutCreateParams,
+	MigrationCheckoutCreateResult,
+	MigrationCheckoutWaitResult,
+} from "../../shared/stripe-checkout";
+import type { MigrationPricingCatalog } from "../../shared/migration-pricing-catalog";
 
 export type MailPortRPC = {
 	bun: RPCSchema<{
@@ -52,10 +58,15 @@ export type MailPortRPC = {
 				params: { role: "source" | "destination" };
 				response: MailboxCredentials | null;
 			};
+			clearMailboxProfiles: {
+				params: Record<string, never>;
+				response: { success: true };
+			};
 			estimateMigrationSize: {
 				params: {
 					source: MailboxCredentials;
 					folderPaths: string[];
+					destination?: MailboxCredentials;
 				};
 				response: MigrationSizeEstimate;
 			};
@@ -80,6 +91,8 @@ export type MailPortRPC = {
 					destination?: MailboxCredentials;
 					folderMappings?: FolderMapping[];
 					resumeMigrationId?: string;
+					plannedSecondsTypical?: number;
+					launchTicket?: string;
 				};
 				response: { migrationId: string };
 			};
@@ -137,6 +150,26 @@ export type MailPortRPC = {
 			seedEtherealTestSource: {
 				params: { credentials: MailboxCredentials };
 				response: { ok: boolean; error?: string };
+			};
+			isStripeConfigured: {
+				params: Record<string, never>;
+				response: { configured: boolean };
+			};
+			createMigrationCheckout: {
+				params: MigrationCheckoutCreateParams;
+				response: MigrationCheckoutCreateResult;
+			};
+			openMigrationCheckout: {
+				params: { checkoutUrl: string };
+				response: { opened: boolean };
+			};
+			waitForMigrationCheckout: {
+				params: { sessionId: string };
+				response: MigrationCheckoutWaitResult;
+			};
+			getMigrationPricingCatalog: {
+				params: Record<string, never>;
+				response: MigrationPricingCatalog;
 			};
 		};
 		messages: {};

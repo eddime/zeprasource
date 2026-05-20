@@ -7,7 +7,11 @@ import type {
 } from "../../shared/types";
 import { applyProviderFromEmail } from "../../shared/mailbox-provider";
 import { PROVIDER_PRESETS } from "../../shared/types";
+import { splitImapHostInput } from "../../shared/imap-host-input";
 import {
+	isLocalTestEmail,
+	isLocalTestMailbox,
+	localTestMissingHostHint,
 	LOCAL_IMAP_DEST,
 	LOCAL_IMAP_SOURCE,
 } from "../../shared/local-test-servers";
@@ -90,14 +94,36 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 			const rpc = getRpc();
 
 			if (!creds.host.trim()) {
-				const discovered = await rpc.request.discoverImapSettings({
-					email: creds.email,
-					password: creds.password,
-				});
-				creds.host = discovered.host;
-				creds.port = discovered.port;
-				creds.secure = discovered.secure;
-				creds.provider = discovered.provider;
+				if (isLocalTestEmail(creds.email)) {
+					const msg = localTestMissingHostHint(target);
+					if (isSource) sourceTestError.value = msg;
+					else destTestError.value = msg;
+					return false;
+				}
+				try {
+					const discovered = await rpc.request.discoverImapSettings({
+						email: creds.email,
+						password: creds.password,
+					});
+					creds.host = discovered.host;
+					creds.port = discovered.port;
+					creds.secure = discovered.secure;
+					creds.provider = discovered.provider;
+					if (isSource) source.value = { ...creds };
+					else destination.value = { ...creds };
+				} catch (error) {
+					const msg =
+						error instanceof Error
+							? error.message
+							: "Could not find your mail server. Check email and password, or try again later.";
+					if (isSource) sourceTestError.value = msg;
+					else destTestError.value = msg;
+					return false;
+				}
+			}
+
+			if (isLocalTestMailbox(creds)) {
+				creds.secure = false;
 				if (isSource) source.value = { ...creds };
 				else destination.value = { ...creds };
 			}
@@ -124,22 +150,43 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 			buildFolderMappings();
 			await rpc.request.saveMailboxProfile({ role: target, credentials: creds });
 			return true;
+		} catch (error) {
+			const msg =
+				error instanceof Error ? error.message : "Could not connect. Try again.";
+			if (isSource) {
+				sourceTestError.value = msg;
+				sourceValidated.value = false;
+			} else {
+				destTestError.value = msg;
+				destValidated.value = false;
+			}
+			return false;
 		} finally {
 			if (isSource) testingSource.value = false;
 			else testingDest.value = false;
 		}
 	}
 
+	function applyLocalPreset(preset: MailboxCredentials, target: "source" | "destination") {
+		const { host, port } = splitImapHostInput(preset.host, preset.port);
+		const creds: MailboxCredentials = { ...preset, host, port, secure: false };
+		if (target === "source") {
+			source.value = creds;
+			sourceValidated.value = false;
+			sourceTestError.value = null;
+		} else {
+			destination.value = creds;
+			destValidated.value = false;
+			destTestError.value = null;
+		}
+	}
+
 	function applyLocalTestSource() {
-		source.value = { ...LOCAL_IMAP_SOURCE };
-		sourceValidated.value = false;
-		sourceTestError.value = null;
+		applyLocalPreset(LOCAL_IMAP_SOURCE, "source");
 	}
 
 	function applyLocalTestDest() {
-		destination.value = { ...LOCAL_IMAP_DEST };
-		destValidated.value = false;
-		destTestError.value = null;
+		applyLocalPreset(LOCAL_IMAP_DEST, "destination");
 	}
 
 	async function applyEtherealTestMailboxes() {
@@ -225,6 +272,27 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		}
 	}
 
+	/** Empty forms for a new migration (does not load saved profiles). */
+	async function resetForNewMigration(): Promise<void> {
+		source.value = emptyCredentials();
+		destination.value = emptyCredentials();
+		sourceFolders.value = [];
+		destFolders.value = [];
+		folderMappings.value = [];
+		sourceValidated.value = false;
+		destValidated.value = false;
+		sourceTestError.value = null;
+		destTestError.value = null;
+		loadingFolderStats.value = false;
+		folderStatsError.value = null;
+		try {
+			const rpc = getRpc();
+			await rpc.request.clearMailboxProfiles({});
+		} catch {
+			/* UI is cleared even if vault cleanup fails */
+		}
+	}
+
 	return {
 		source,
 		destination,
@@ -250,5 +318,6 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		buildFolderMappings,
 		loadFolderStats,
 		loadSavedProfiles,
+		resetForNewMigration,
 	};
 });

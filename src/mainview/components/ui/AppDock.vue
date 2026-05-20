@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onUnmounted, ref } from "vue";
+import { computed, onUnmounted, ref, watch } from "vue";
 import AppButton from "./AppButton.vue";
 import DockIcon from "./DockIcon.vue";
 
@@ -13,6 +13,23 @@ const props = withDefaults(
 );
 
 defineEmits<{ action: [] }>();
+
+const isInactive = computed(() => props.disabled || props.loading);
+const isReady = computed(() => !isInactive.value);
+
+const showReadyPulse = ref(false);
+let readyPulseTimer: ReturnType<typeof setTimeout> | null = null;
+
+watch(isInactive, (inactive, wasInactive) => {
+	if (wasInactive !== true || inactive) return;
+
+	showReadyPulse.value = true;
+	if (readyPulseTimer) clearTimeout(readyPulseTimer);
+	readyPulseTimer = setTimeout(() => {
+		showReadyPulse.value = false;
+		readyPulseTimer = null;
+	}, 700);
+});
 
 const iconKind = computed((): "migrate" | "pending" | "measure" | null => {
 	if (props.loading) return null;
@@ -106,11 +123,15 @@ function onCtaPointerLeave() {
 
 onUnmounted(() => {
 	if (rafId !== null) cancelAnimationFrame(rafId);
+	if (readyPulseTimer) clearTimeout(readyPulseTimer);
 });
 </script>
 
 <template>
-	<footer class="app-dock">
+	<footer
+		class="app-dock"
+		:class="{ 'dock-ready': isReady, 'dock-ready-pulse': showReadyPulse }"
+	>
 		<div class="dock-shell">
 			<div v-if="$slots.top" class="app-dock-top">
 				<slot name="top" />
@@ -170,12 +191,20 @@ onUnmounted(() => {
 		box-shadow 0.36s ease;
 }
 
-.app-dock:hover .dock-shell,
-.app-dock:focus-within .dock-shell {
+.app-dock.dock-ready:hover .dock-shell,
+.app-dock.dock-ready:focus-within .dock-shell {
 	border-radius: var(--radius-pill, 999px);
 	box-shadow: 0 10px 32px rgba(0, 0, 0, 0.2);
 	/* Transform only — padding would leave a dead zone and flicker at the bottom edge */
 	transform: translateY(calc(-1 * var(--dock-lift)));
+}
+
+.app-dock:not(.dock-ready) .dock-shell {
+	transition:
+		transform 0.38s var(--dock-ease),
+		border-radius 0.42s var(--dock-ease),
+		box-shadow 0.36s ease,
+		background-color 0.35s ease;
 }
 
 .app-dock-top {
@@ -243,8 +272,8 @@ onUnmounted(() => {
 	transition: height 0.62s var(--dock-ease-bounce);
 }
 
-.app-dock:hover .dock-row,
-.app-dock:focus-within .dock-row {
+.app-dock.dock-ready:hover .dock-row,
+.app-dock.dock-ready:focus-within .dock-row {
 	height: var(--dock-h-active);
 }
 
@@ -278,8 +307,8 @@ onUnmounted(() => {
 	transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.app-dock:hover :deep(.dock-folder-icon),
-.app-dock:focus-within :deep(.dock-folder-icon) {
+.app-dock.dock-ready:hover :deep(.dock-folder-icon),
+.app-dock.dock-ready:focus-within :deep(.dock-folder-icon) {
 	transform: translateY(-2px);
 }
 
@@ -304,8 +333,8 @@ onUnmounted(() => {
 		opacity 0.15s ease;
 }
 
-.app-dock:hover :deep(.dock-cta.btn:not(:disabled)),
-.app-dock:focus-within :deep(.dock-cta.btn:not(:disabled)) {
+.app-dock.dock-ready:hover :deep(.dock-cta.btn:not(:disabled)),
+.app-dock.dock-ready:focus-within :deep(.dock-cta.btn:not(:disabled)) {
 	font-size: 1.0625rem;
 }
 
@@ -318,8 +347,29 @@ onUnmounted(() => {
 	opacity: 0.72;
 }
 
-.app-dock:has(.dock-cta.btn:disabled) .dock-shell {
+.app-dock:not(.dock-ready) .dock-shell {
 	background: #2a2a2a;
+}
+
+.app-dock.dock-ready-pulse .dock-shell {
+	animation: dock-ready-pulse 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@keyframes dock-ready-pulse {
+	0% {
+		background-color: #2a2a2a;
+		box-shadow: none;
+	}
+	35% {
+		background-color: #141414;
+		box-shadow:
+			0 0 0 1px rgba(255, 255, 255, 0.2),
+			0 8px 28px rgba(255, 255, 255, 0.08);
+	}
+	100% {
+		background-color: #0a0a0a;
+		box-shadow: none;
+	}
 }
 
 .app-dock :deep(.dock-cta.btn:not(:disabled)) {
@@ -362,8 +412,8 @@ onUnmounted(() => {
 		opacity 0.28s ease;
 }
 
-.app-dock:hover :deep(.dock-icon-wrap),
-.app-dock:focus-within :deep(.dock-icon-wrap) {
+.app-dock.dock-ready:hover :deep(.dock-icon-wrap),
+.app-dock.dock-ready:focus-within :deep(.dock-icon-wrap) {
 	width: 1.3125rem;
 	height: 1.3125rem;
 	opacity: 1;
@@ -378,8 +428,8 @@ onUnmounted(() => {
 	.app-dock,
 	.dock-shell,
 	.dock-row,
-	.app-dock:hover .dock-shell,
-	.app-dock:focus-within .dock-shell,
+	.app-dock.dock-ready:hover .dock-shell,
+	.app-dock.dock-ready:focus-within .dock-shell,
 	.app-dock :deep(.dock-cta.btn),
 	.app-dock :deep(.dock-cta-inner),
 	.app-dock :deep(.dock-icon-wrap),
@@ -387,31 +437,36 @@ onUnmounted(() => {
 		transition: none;
 	}
 
-	.app-dock:hover .dock-row,
-	.app-dock:focus-within .dock-row {
+	.app-dock.dock-ready-pulse .dock-shell {
+		animation: none;
+		background-color: #0a0a0a;
+	}
+
+	.app-dock.dock-ready:hover .dock-row,
+	.app-dock.dock-ready:focus-within .dock-row {
 		height: var(--dock-h-active);
 	}
 
-	.app-dock:hover .dock-shell,
-	.app-dock:focus-within .dock-shell {
+	.app-dock.dock-ready:hover .dock-shell,
+	.app-dock.dock-ready:focus-within .dock-shell {
 		border-radius: var(--radius-pill, 999px);
 		box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
 		transform: translateY(calc(-1 * var(--dock-lift)));
 	}
 
-	.app-dock:hover :deep(.dock-cta.btn:not(:disabled)),
-	.app-dock:focus-within :deep(.dock-cta.btn:not(:disabled)) {
+	.app-dock.dock-ready:hover :deep(.dock-cta.btn:not(:disabled)),
+	.app-dock.dock-ready:focus-within :deep(.dock-cta.btn:not(:disabled)) {
 		font-size: 1.0625rem;
 	}
 
-	.app-dock:hover :deep(.dock-icon-wrap),
-	.app-dock:focus-within :deep(.dock-icon-wrap) {
+	.app-dock.dock-ready:hover :deep(.dock-icon-wrap),
+	.app-dock.dock-ready:focus-within :deep(.dock-icon-wrap) {
 		width: 1.3125rem;
 		height: 1.3125rem;
 	}
 
-	.app-dock:hover :deep(.dock-folder-icon),
-	.app-dock:focus-within :deep(.dock-folder-icon),
+	.app-dock.dock-ready:hover :deep(.dock-folder-icon),
+	.app-dock.dock-ready:focus-within :deep(.dock-folder-icon),
 	.app-dock :deep(.dock-cta-inner),
 	.app-dock :deep(.dock-icon-wrap) {
 		transform: none;

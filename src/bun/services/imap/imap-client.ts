@@ -6,6 +6,7 @@ import type {
 	MailboxCredentials,
 	MigrationSizeEstimate,
 } from "../../../shared/types";
+import { estimateMigrationDuration } from "../../../shared/migration-duration";
 import {
 	FREE_MIGRATION_LIMIT_BYTES,
 	requiresPaidPlan,
@@ -288,10 +289,11 @@ export async function measureFolderSizes(
 }
 
 export async function estimateMigrationSize(
-	credentials: MailboxCredentials,
+	source: MailboxCredentials,
 	folderPaths: string[],
+	destination?: MailboxCredentials,
 ): Promise<MigrationSizeEstimate> {
-	const folders = await measureFolderSizes(credentials, folderPaths);
+	const folders = await measureFolderSizes(source, folderPaths);
 	let totalBytes = 0;
 	let messageCount = 0;
 	for (const folder of folders) {
@@ -299,11 +301,21 @@ export async function estimateMigrationSize(
 		messageCount += folder.messages;
 	}
 
+	const duration = estimateMigrationDuration({
+		totalBytes,
+		messageCount,
+		sourceProvider: source.provider,
+		destProvider: destination?.provider ?? "generic",
+	});
+
 	return {
 		totalBytes,
 		messageCount,
 		folders,
 		requiresPayment: requiresPaidPlan(totalBytes),
 		freeLimitBytes: FREE_MIGRATION_LIMIT_BYTES,
+		durationLabel: duration.label,
+		durationRangeLabel: duration.rangeLabel,
+		secondsTypical: duration.secondsTypical,
 	};
 }

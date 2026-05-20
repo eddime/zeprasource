@@ -1,0 +1,20 @@
+{
+	"name": "zepra-server",
+	"version": "0.1.0",
+	"type": "module",
+	"private": true,
+	"description": "Stripe checkout, webhooks, and migration licenses for the Zepra desktop app",
+	"scripts": {
+		"start": "bun run src/index.ts",
+		"dev": "bun --watch src/index.ts",
+		"typecheck": "tsc --noEmit",
+		"test": "bun test src"
+	},
+	"dependencies": {
+		"stripe": "^22.1.1"
+	},
+	"devDependencies": {
+		"@types/bun": "latest",
+		"typescript": "5.9.3"
+	}
+}

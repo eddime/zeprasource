@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import type { FolderMapping } from "../../../shared/types";
-import { formatBytes } from "../../../shared/pricing";
-import ZebraMascot from "../zebra/ZebraMascot.vue";
+import { computed, onMounted, ref, watch } from "vue";
+import type { FolderMapping, MailboxProvider } from "../../../shared/types";
+import {
+	estimateMigrationDuration,
+	formatDurationCompact,
+} from "../../../shared/migration-duration";
+import { formatBytes, requiresPaidPlan } from "../../../shared/pricing";
+import { usePricingStore } from "../../stores/pricing";
+import MigrationPaidPlanNotice from "../migration/MigrationPaidPlanNotice.vue";
+import SetupStepHero from "./SetupStepHero.vue";
 import AppDock from "../ui/AppDock.vue";
 
 const folderMappings = defineModel<FolderMapping[]>("folderMappings", { required: true });
 
 const props = defineProps<{
-	sourceEmail: string;
-	destEmail: string;
+	sourceProvider: MailboxProvider;
+	destProvider: MailboxProvider;
 	loadingStats: boolean;
 	statsError: string | null;
 	estimatingSize: boolean;
@@ -22,6 +28,12 @@ const emit = defineEmits<{
 	retryStats: [];
 	startMigration: [];
 }>();
+
+const pricing = usePricingStore();
+
+onMounted(() => {
+	void pricing.ensureLoaded();
+});
 
 function formatMessageCount(count: number): string {
 	return count === 1 ? "1 email" : `${count.toLocaleString()} emails`;
@@ -92,6 +104,40 @@ const selectionSummary = computed(() => {
 	return `${selectedCount.value} folders · ${formatMessageCount(selectedMessages.value)} · ${formatBytes(selectedBytes.value)}`;
 });
 
+const durationEstimate = computed(() => {
+	if (props.loadingStats || selectedCount.value === 0) return null;
+	if (selectedMessages.value === 0 && selectedBytes.value === 0) return null;
+	return estimateMigrationDuration({
+		totalBytes: selectedBytes.value,
+		messageCount: selectedMessages.value,
+		sourceProvider: props.sourceProvider,
+		destProvider: props.destProvider,
+	});
+});
+
+const needsPaidPlan = computed(
+	() =>
+		!props.loadingStats &&
+		selectedCount.value > 0 &&
+		selectedBytes.value > 0 &&
+		requiresPaidPlan(selectedBytes.value),
+);
+
+const startButtonLabel = computed(() => {
+	if (props.estimatingSize) return "Checking…";
+
+	const durationSuffix = durationEstimate.value
+		? ` (~${formatDurationCompact(durationEstimate.value.secondsTypical)})`
+		: "";
+
+	if (needsPaidPlan.value) {
+		const tier = pricing.tierForBytes(selectedBytes.value);
+		return `Start migration · ${tier.priceLabel} once${durationSuffix}`;
+	}
+
+	return `Start migration${durationSuffix}`;
+});
+
 const canStart = computed(
 	() => selectedCount.value > 0 && !props.estimatingSize && !props.loadingStats,
 );
@@ -110,33 +156,19 @@ function onSelectAllChange(event: Event) {
 <template>
 	<div class="setup-folders">
 		<div class="folders-scroll">
-			<header class="hero">
-				<div class="hero-zebra">
-					<ZebraMascot state="idle" :size="120" class="hero-zebra-img" />
-				</div>
-				<div class="hero-copy">
-					<button type="button" class="hero-back" @click="emit('back')">
-						← Back to mailboxes
-					</button>
-					<p class="eyebrow">Step 2 of 2</p>
-					<h1 class="hero-title">Choose folders to migrate</h1>
-					<p class="hero-sub">
-						From <strong>{{ sourceEmail || "source" }}</strong> to
-						<strong>{{ destEmail || "destination" }}</strong> — pick what should move.
-					</p>
-					<div class="step-track" aria-label="Setup progress">
-						<div class="step-pill done">
-							<span class="step-num">✓</span>
-							<span>Connected</span>
-						</div>
-						<div class="step-line active" />
-						<div class="step-pill done">
-							<span class="step-num">2</span>
-							<span>Folders</span>
-						</div>
-					</div>
-				</div>
-			</header>
+			<SetupStepHero
+				eyebrow="Step 2 of 2 · Folders"
+				title="Choose folders to migrate"
+				subline="Pick what should move."
+				show-back
+				@back="emit('back')"
+			/>
+
+			<MigrationPaidPlanNotice
+				:selected-bytes="selectedBytes"
+				:loading-stats="loadingStats"
+				:has-selection="selectedCount > 0"
+			/>
 
 			<section class="folder-panel" aria-labelledby="folder-list-heading">
 				<div class="folder-panel-top">
@@ -194,7 +226,7 @@ function onSelectAllChange(event: Event) {
 		</div>
 
 		<AppDock
-			label="Start migration"
+			:label="startButtonLabel"
 			:disabled="!canStart"
 			:loading="estimatingSize"
 			@action="emit('startMigration')"
@@ -226,125 +258,6 @@ function onSelectAllChange(event: Event) {
 	gap: 0.65rem;
 	padding: 0 0 var(--app-dock-h-hover);
 	scrollbar-width: thin;
-}
-
-.hero {
-	flex-shrink: 0;
-	display: grid;
-	grid-template-columns: auto 1fr;
-	gap: 0.5rem 1.25rem;
-	align-items: center;
-	padding: 1rem 1.35rem;
-	background: var(--surface);
-	border: 1px solid var(--border);
-	border-radius: 20px;
-	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.05);
-}
-
-.hero-zebra {
-	flex-shrink: 0;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-}
-
-.hero-copy {
-	min-width: 0;
-}
-
-.hero-back {
-	display: inline-block;
-	margin: 0 0 0.35rem;
-	padding: 0;
-	border: none;
-	background: none;
-	font-size: 0.72rem;
-	font-weight: 600;
-	color: var(--muted);
-	cursor: pointer;
-}
-
-.hero-back:hover {
-	color: var(--fg);
-}
-
-.eyebrow {
-	margin: 0;
-	font-size: 0.72rem;
-	font-weight: 700;
-	text-transform: uppercase;
-	letter-spacing: 0.12em;
-	color: var(--muted);
-}
-
-.hero-title {
-	margin: 0.35rem 0 0;
-	font-size: 1.65rem;
-	font-weight: 800;
-	letter-spacing: -0.035em;
-	line-height: 1.05;
-}
-
-.hero-sub {
-	margin: 0.4rem 0 0;
-	font-size: 0.9rem;
-	line-height: 1.45;
-	color: var(--muted);
-	max-width: 34rem;
-}
-
-.hero-sub strong {
-	color: var(--fg);
-	font-weight: 700;
-}
-
-.step-track {
-	display: flex;
-	align-items: center;
-	gap: 0.5rem;
-	margin-top: 0.75rem;
-}
-
-.step-pill {
-	display: inline-flex;
-	align-items: center;
-	gap: 0.4rem;
-	padding: 0.3rem 0.65rem 0.3rem 0.3rem;
-	border-radius: var(--radius-pill);
-	border: 1.5px solid var(--border);
-	background: var(--bg);
-	font-size: 0.72rem;
-	font-weight: 700;
-	color: var(--muted);
-}
-
-.step-pill.done {
-	border-color: var(--fg);
-	background: var(--fg);
-	color: #fff;
-}
-
-.step-num {
-	width: 1.35rem;
-	height: 1.35rem;
-	border-radius: 50%;
-	display: grid;
-	place-items: center;
-	font-size: 0.68rem;
-	font-weight: 800;
-	background: rgba(0, 0, 0, 0.08);
-}
-
-.step-pill.done .step-num {
-	background: rgba(255, 255, 255, 0.2);
-}
-
-.step-line {
-	flex: 1;
-	max-width: 3rem;
-	height: 2px;
-	border-radius: 1px;
-	background: var(--fg);
 }
 
 .folder-panel {

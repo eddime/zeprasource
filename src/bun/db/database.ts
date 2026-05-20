@@ -81,8 +81,64 @@ CREATE TABLE IF NOT EXISTS migration_messages (
 CREATE INDEX IF NOT EXISTS idx_migration_messages_status
   ON migration_messages(migration_id, status);
 
+CREATE UNIQUE INDEX IF NOT EXISTS idx_migration_messages_folder_hash_uid
+  ON migration_messages(migration_id, source_folder_hash, source_uid);
+
+CREATE INDEX IF NOT EXISTS idx_migration_folders_source_path_hash
+  ON migration_folders(migration_id, source_path_hash);
+
 CREATE INDEX IF NOT EXISTS idx_migrations_status ON migrations(status);
+
+CREATE TABLE IF NOT EXISTS migration_payment_entitlements (
+  id TEXT PRIMARY KEY,
+  stripe_session_id TEXT NOT NULL UNIQUE,
+  tier_id TEXT NOT NULL,
+  total_bytes INTEGER NOT NULL,
+  message_count INTEGER NOT NULL,
+  folder_paths_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  expires_at TEXT NOT NULL,
+  consumed_at TEXT,
+  migration_id TEXT,
+  FOREIGN KEY (migration_id) REFERENCES migrations(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_payment_entitlements_unconsumed
+  ON migration_payment_entitlements(consumed_at, expires_at);
+
+CREATE TABLE IF NOT EXISTS used_launch_tickets (
+  jti TEXT PRIMARY KEY,
+  stripe_session_id TEXT NOT NULL,
+  migration_id TEXT,
+  used_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 `;
+
+function applySchemaMigrations(database: Database): void {
+	const migrationColumns = database
+		.query("PRAGMA table_info(migrations)")
+		.all() as Array<{ name: string }>;
+	const names = new Set(migrationColumns.map((c) => c.name));
+	const addColumn = (sql: string) => {
+		try {
+			database.exec(sql);
+		} catch {
+			/* column may already exist */
+		}
+	};
+	if (!names.has("stripe_session_id")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN stripe_session_id TEXT");
+	}
+	if (!names.has("license_jti")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN license_jti TEXT");
+	}
+	if (!names.has("licensed_total_bytes")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN licensed_total_bytes INTEGER");
+	}
+	if (!names.has("license_folder_hash")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN license_folder_hash TEXT");
+	}
+}
 
 let db: Database | null = null;
 
@@ -103,7 +159,7 @@ export function getDatabase(): Database {
 	db.exec("PRAGMA journal_mode = WAL;");
 	db.exec("PRAGMA foreign_keys = ON;");
 	db.exec(SCHEMA);
-	ensurePrivacyColumns(db);
+	applySchemaMigrations(db);
 
 	const settingsRow = db
 		.query("SELECT value FROM settings WHERE key = 'app'")
@@ -113,31 +169,6 @@ export function getDatabase(): Database {
 	}
 
 	return db;
-}
-
-function hasColumn(database: Database, table: string, column: string): boolean {
-	const rows = database.query(`PRAGMA table_info(${table})`).all() as Array<{
-		name: string;
-	}>;
-	return rows.some((row) => row.name === column);
-}
-
-function ensurePrivacyColumns(database: Database): void {
-	if (!hasColumn(database, "migration_folders", "source_path_hash")) {
-		database.exec("ALTER TABLE migration_folders ADD COLUMN source_path_hash TEXT");
-	}
-	if (!hasColumn(database, "migration_messages", "source_folder_hash")) {
-		database.exec("ALTER TABLE migration_messages ADD COLUMN source_folder_hash TEXT");
-	}
-	database.exec("DROP INDEX IF EXISTS idx_migration_messages_folder_hash_uid;");
-	database.exec(
-		`CREATE UNIQUE INDEX IF NOT EXISTS idx_migration_messages_folder_hash_uid
-     ON migration_messages(migration_id, source_folder_hash, source_uid);`,
-	);
-	database.exec(
-		`CREATE INDEX IF NOT EXISTS idx_migration_folders_source_path_hash
-     ON migration_folders(migration_id, source_path_hash);`,
-	);
 }
 
 export function getDataDirectory(): string {

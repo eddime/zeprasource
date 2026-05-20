@@ -1,3 +1,4 @@
+import { splitImapHostInput } from "../../../shared/imap-host-input";
 import type { MailboxCredentials } from "../../../shared/types";
 import { PROVIDER_PRESETS } from "../../../shared/types";
 import { classifyMigrationError } from "../migration/migration-errors";
@@ -25,24 +26,7 @@ export function parseImapHostInput(
 	hostInput: string,
 	portInput: number | string,
 ): { host: string; port: number } {
-	let host = hostInput.trim().replace(/^imap(s)?:\/\//i, "").split("/")[0] ?? "";
-	let port =
-		typeof portInput === "string" ? Number.parseInt(portInput, 10) : portInput;
-
-	if (host.includes(":")) {
-		const [hostPart, portPart] = host.split(":");
-		host = hostPart ?? host;
-		const parsed = Number.parseInt(portPart ?? "", 10);
-		if (Number.isFinite(parsed) && parsed > 0) port = parsed;
-	}
-
-	host = host.replace(/^\[|\]$/g, "");
-	if (/^localhost$/i.test(host)) host = "127.0.0.1";
-
-	return {
-		host,
-		port: Number.isFinite(port) && port > 0 ? port : 993,
-	};
+	return splitImapHostInput(hostInput, portInput);
 }
 
 /** Normalize RPC/UI payload before IMAP connect. */
@@ -67,10 +51,17 @@ export function normalizeMailboxCredentials(
 		host = PROVIDER_PRESETS.icloud.host;
 	}
 
+	const isLocalHost =
+		host === "127.0.0.1" ||
+		host === "localhost" ||
+		port === 1143 ||
+		port === 2143;
+
 	const secureExplicit = credentials.secure === true || credentials.secure === false;
-	const secure = secureExplicit
-		? credentials.secure
-		: port === 993;
+	let secure = secureExplicit ? credentials.secure : port === 993;
+	if (isLocalHost) {
+		secure = false;
+	}
 
 	return {
 		...credentials,

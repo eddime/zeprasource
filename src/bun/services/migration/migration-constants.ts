@@ -1,2 +1,2 @@
 /** UIDs per IMAP FETCH during migration transfer. */
-export const MIGRATION_FETCH_BATCH_SIZE = 50;
+export const MIGRATION_FETCH_BATCH_SIZE = 80;

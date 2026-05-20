@@ -96,6 +96,18 @@ export function loadMailboxCredentialsByRole(
 	return loadCredentialsFromProfile(row);
 }
 
+/** Remove saved source/destination profiles (fresh migration setup). */
+export function clearMailboxProfiles(): void {
+	const db = getDatabase();
+	const rows = db
+		.query("SELECT credential_ref FROM mailbox_profiles")
+		.all() as Array<{ credential_ref: string }>;
+	for (const row of rows) {
+		credentialStore.delete(row.credential_ref);
+	}
+	db.exec("DELETE FROM mailbox_profiles");
+}
+
 export function loadMailboxProfileForDisplay(
 	role: MailboxRole,
 ): MailboxCredentials | null {

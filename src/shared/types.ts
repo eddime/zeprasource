@@ -38,6 +38,8 @@ export type MigrationStatus =
 export interface MigrationProgress {
 	migrationId: string;
 	status: MigrationStatus;
+	/** Live estimate from progress, e.g. "~45 minutes left". */
+	remainingDurationLabel?: string;
 	currentFolder?: string;
 	activityPhase?:
 		| "connecting"
@@ -80,10 +82,6 @@ export interface MigrationRecord {
 
 export interface AppSettings {
 	theme: "system" | "light" | "dark";
-	parallelConnections: number;
-	retryAttempts: number;
-	skipDuplicates: boolean;
-	preserveFlags: boolean;
 	telemetryEnabled: boolean;
 }
 
@@ -102,12 +100,19 @@ export interface FolderSizeEstimate {
 	bytes: number;
 }
 
+export type { MigrationDurationEstimate } from "./migration-duration";
+
 export interface MigrationSizeEstimate {
 	totalBytes: number;
 	messageCount: number;
 	folders: FolderSizeEstimate[];
 	requiresPayment: boolean;
 	freeLimitBytes: number;
+	/** Typical local run time, e.g. "~2 hours". */
+	durationLabel: string;
+	/** Expectation band, e.g. "about 1–3 hours". */
+	durationRangeLabel: string;
+	secondsTypical: number;
 }
 
 export type {
@@ -117,10 +122,6 @@ export type {
 
 export const DEFAULT_SETTINGS: AppSettings = {
 	theme: "light",
-	parallelConnections: 3,
-	retryAttempts: 3,
-	skipDuplicates: true,
-	preserveFlags: true,
 	telemetryEnabled: false,
 };
 

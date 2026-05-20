@@ -13,7 +13,6 @@ onMounted(async () => {
 	document.documentElement.classList.remove("dark");
 	migration.listenForProgress();
 	await settings.load();
-	await mailboxes.loadSavedProfiles();
 	await migration.hydrateSessions();
 });
 </script>

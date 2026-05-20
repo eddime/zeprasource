@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import { applyProviderFromEmail } from "../../../shared/mailbox-provider";
+import { splitImapHostInput } from "../../../shared/imap-host-input";
 import type { MailboxCredentials } from "../../../shared/types";
 import { PROVIDER_PRESETS } from "../../../shared/types";
-import AppButton from "../ui/AppButton.vue";
 import AppInput from "../ui/AppInput.vue";
 
 const credentials = defineModel<MailboxCredentials>("credentials", { required: true });
@@ -11,32 +11,29 @@ const credentials = defineModel<MailboxCredentials>("credentials", { required: t
 const props = defineProps<{
 	title: string;
 	subtitle?: string;
-	step?: number;
+	role: "from" | "to";
 	validated: boolean;
 	testing: boolean;
 	error?: string | null;
 }>();
 
-const emit = defineEmits<{ verify: [] }>();
+const emit = defineEmits<{ verify: []; credentialsEdited: [] }>();
 
-type CardView = "account" | "server";
-const cardView = ref<CardView>("account");
 const showConnectedOverlay = ref(false);
 
 watch(
 	() => props.validated,
 	(ok) => {
-		if (ok) {
-			showConnectedOverlay.value = true;
-			cardView.value = "account";
-		} else {
-			showConnectedOverlay.value = false;
-		}
+		if (ok) showConnectedOverlay.value = true;
+		else showConnectedOverlay.value = false;
 	},
 	{ immediate: true },
 );
 
 const overlayVisible = computed(() => props.validated && showConnectedOverlay.value);
+
+const localError = ref<string | null>(null);
+const displayError = computed(() => props.error ?? localError.value);
 
 watch(
 	() => credentials.value.email,
@@ -65,63 +62,70 @@ const passwordLabel = computed(() => {
 	}
 });
 
-const serverSummary = computed(() => {
-	if (!credentials.value.host) return null;
-	const tls = credentials.value.secure ? "TLS" : "no TLS";
-	return `${credentials.value.host}:${credentials.value.port} · ${tls}`;
+const verifyLabel = computed(() => {
+	if (props.testing) return "Checking connection…";
+	if (props.validated) return "Check again";
+	return "Check connection";
 });
 
-const usernameField = computed({
-	get: () => credentials.value.username ?? "",
-	set: (value: string) => {
-		credentials.value.username = value.trim() || undefined;
-	},
-});
-
-function toggleView() {
-	cardView.value = cardView.value === "account" ? "server" : "account";
+function normalizeServerHost(): void {
+	const { host, port } = splitImapHostInput(
+		credentials.value.host,
+		credentials.value.port,
+	);
+	credentials.value.host = host;
+	credentials.value.port = port;
 }
 
 function openEditor() {
 	showConnectedOverlay.value = false;
+	if (props.validated) emit("credentialsEdited");
 }
+
+function onVerifyClick() {
+	localError.value = null;
+	normalizeServerHost();
+	if (!credentials.value.email.trim()) {
+		localError.value = "Please enter your email address.";
+		return;
+	}
+	if (!credentials.value.password?.trim()) {
+		localError.value = "Please enter your password.";
+		return;
+	}
+	emit("verify");
+}
+
+watch(
+	credentials,
+	() => {
+		localError.value = null;
+		if (props.validated) {
+			openEditor();
+		}
+	},
+	{ deep: true },
+);
 </script>
 
 <template>
 	<article
 		class="card"
-		:class="{
-			ok: validated,
-			'card-connected': overlayVisible,
-			'view-server': cardView === 'server' && !overlayVisible,
-		}"
+		:class="[`card--${role}`, { ok: validated, 'is-connected': overlayVisible }]"
 	>
-		<header class="card-top" :class="{ 'is-covered': overlayVisible }">
+		<header v-if="!overlayVisible" class="card-top">
 			<div class="card-identity">
-				<span v-if="step != null" class="step-mark">{{ step }}</span>
-				<div class="card-titles">
-					<h3>{{ title }}</h3>
-					<p v-if="subtitle" class="card-sub">{{ subtitle }}</p>
-				</div>
-			</div>
-			<div v-if="!overlayVisible" class="card-actions">
-				<button
-					type="button"
-					class="view-toggle"
-					:class="{ on: cardView === 'server' }"
-					:aria-pressed="cardView === 'server'"
-					@click="toggleView"
-				>
-					{{ cardView === "server" ? "Account" : "Server" }}
-				</button>
+				<span class="role-badge">{{ title }}</span>
+				<p v-if="subtitle" class="card-sub">{{ subtitle }}</p>
 			</div>
 		</header>
 
 		<div class="card-main">
-		<div class="card-body" :class="{ 'is-covered': overlayVisible }">
-			<Transition name="card-swap" mode="out-in">
-				<div v-if="cardView === 'account'" key="account" class="card-pane">
-					<p v-if="providerBadge && !validated" class="provider-badge">{{ providerBadge }}</p>
+			<div class="card-body" :class="{ 'is-dimmed': overlayVisible }">
+				<div class="card-pane">
+					<p v-if="providerBadge && !overlayVisible" class="provider-badge">
+						{{ providerBadge }}
+					</p>
 
 					<div class="cred-stack">
 						<AppInput
@@ -137,11 +141,10 @@ function openEditor() {
 							type="password"
 							placeholder="••••••••"
 							autocomplete="current-password"
-							:error="error ?? undefined"
 						/>
 					</div>
 
-					<p v-if="hint && !validated" class="hint-banner">
+					<p v-if="hint && !overlayVisible" class="hint-banner">
 						<span>{{ hint }}</span>
 						<a
 							v-if="hintLink"
@@ -153,67 +156,58 @@ function openEditor() {
 							{{ hintLink.label }}
 						</a>
 					</p>
-					<p v-if="serverSummary && validated && !overlayVisible" class="server-pill">
-						{{ serverSummary }}
-					</p>
 				</div>
+			</div>
 
-				<div v-else key="server" class="card-pane">
-					<p class="server-intro">Override IMAP host if auto-detect fails.</p>
-					<div class="server-fields">
-						<AppInput
-							v-model="credentials.host"
-							label="IMAP server"
-							placeholder="Auto-detected on verify"
-						/>
-						<div class="port-row">
-							<AppInput
-								:model-value="String(credentials.port)"
-								label="Port"
-								type="number"
-								placeholder="993"
-								@update:model-value="credentials.port = Number($event) || 993"
-							/>
-							<label class="tls">
-								<input v-model="credentials.secure" type="checkbox" />
-								Use TLS
-							</label>
-						</div>
-						<AppInput
-							v-model="usernameField"
-							label="Username (optional)"
-							placeholder="Same as email if empty"
-							autocomplete="username"
-						/>
-					</div>
-				</div>
-			</Transition>
+			<footer v-show="!overlayVisible" class="card-foot">
+				<p v-if="displayError" class="verify-error" role="alert">
+					{{ displayError }}
+				</p>
+				<button
+					type="button"
+					class="verify-btn"
+					:class="{
+						'is-loading': testing,
+						'is-ok': validated && !testing,
+						'is-idle': !validated && !testing,
+						'has-error': Boolean(displayError) && !testing,
+					}"
+					:disabled="testing"
+					:aria-busy="testing"
+					@click="onVerifyClick"
+				>
+					<span v-if="testing" class="verify-spin" aria-hidden="true" />
+					<span v-else-if="validated" class="verify-check" aria-hidden="true">✓</span>
+					<span class="verify-text">{{ verifyLabel }}</span>
+				</button>
+			</footer>
 		</div>
 
-		<footer class="card-foot" :class="{ 'is-covered': overlayVisible }">
-			<AppButton
-				type="button"
-				class="verify-btn"
-				:variant="validated ? 'secondary' : 'primary'"
-				block
-				:loading="testing"
-				@click="emit('verify')"
+		<Transition name="connected">
+			<div
+				v-if="overlayVisible"
+				class="connected-overlay"
+				role="status"
+				:aria-label="`${title} mailbox connected`"
 			>
-				{{ validated ? "Re-verify connection" : "Verify connection" }}
-			</AppButton>
-		</footer>
-		</div>
-
-		<Transition name="overlay-fade">
-			<div v-if="overlayVisible" class="connected-overlay" role="status">
 				<div class="connected-content">
-					<p class="connected-side">{{ title }}</p>
-					<span class="connected-mark" aria-hidden="true">✓</span>
-					<h4 class="connected-title">Connected</h4>
+					<p class="connected-role">{{ title }}</p>
+					<span class="connected-check" aria-hidden="true">
+						<svg viewBox="0 0 24 24" fill="none">
+							<path
+								d="M8 12.2 10.6 14.8 16 9.4"
+								stroke="currentColor"
+								stroke-width="2.25"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+							/>
+						</svg>
+					</span>
+					<p class="connected-title">Connected</p>
 					<p class="connected-email">{{ credentials.email }}</p>
-					<p v-if="serverSummary" class="connected-server">{{ serverSummary }}</p>
-					<button type="button" class="make-changes-btn" @click="openEditor">
-						Make changes
+					<p v-if="providerBadge" class="connected-provider">{{ providerBadge }}</p>
+					<button type="button" class="connected-change-btn" @click="openEditor">
+						Change email or password
 					</button>
 				</div>
 			</div>
@@ -223,122 +217,65 @@ function openEditor() {
 
 <style scoped>
 .card {
-	--connected-bg: #99bd91;
-	--connected-fg: #1a2418;
-	--connected-muted: rgba(26, 36, 24, 0.62);
 	position: relative;
 	display: flex;
 	flex-direction: column;
 	min-height: 0;
 	background: var(--surface);
-	border: 1.5px solid var(--border);
-	border-radius: 16px;
+	border: 1px solid var(--border);
+	border-radius: 20px;
 	overflow: hidden;
-	box-shadow: 0 4px 24px rgba(0, 0, 0, 0.05);
+	box-shadow: 0 8px 32px rgba(0, 0, 0, 0.05);
 	transition:
-		border-color 0.2s ease,
-		box-shadow 0.2s ease;
+		border-color 0.25s ease,
+		box-shadow 0.25s ease;
 }
 
-.card.ok:not(.card-connected) {
+.card.ok:not(.is-connected) {
 	border-color: var(--fg);
 	box-shadow: 0 0 0 1px var(--fg);
 }
 
-.card.card-connected {
+.card.is-connected {
 	border-color: #8aad82;
-	box-shadow: none;
-}
-
-.card.view-server {
-	border-color: color-mix(in srgb, var(--fg) 35%, var(--border));
+	box-shadow:
+		0 0 0 2px rgba(138, 173, 130, 0.35),
+		0 8px 32px rgba(95, 122, 89, 0.1);
 }
 
 .card-top {
 	display: flex;
-	align-items: flex-start;
+	align-items: center;
 	justify-content: space-between;
 	gap: 0.5rem;
-	padding: 0.65rem 0.75rem;
+	padding: 0.5rem 0.7rem;
 	border-bottom: 1px solid var(--border);
-	background: linear-gradient(180deg, #fff 0%, #fafafa 100%);
-}
-
-.card.ok:not(.card-connected) .card-top {
-	background: linear-gradient(180deg, #fff 0%, #f5f5f5 100%);
+	background: var(--surface);
 }
 
 .card-identity {
 	display: flex;
-	align-items: flex-start;
-	gap: 0.55rem;
+	align-items: baseline;
+	gap: 0.45rem;
 	min-width: 0;
 	flex: 1;
+	flex-wrap: wrap;
 }
 
-.card-actions {
-	display: flex;
-	align-items: center;
-	gap: 0.35rem;
+.role-badge {
 	flex-shrink: 0;
-}
-
-.view-toggle {
-	border: 1.5px solid var(--border);
-	background: var(--surface);
-	color: var(--muted);
-	font-size: 0.68rem;
-	font-weight: 700;
-	padding: 0.3rem 0.55rem;
-	border-radius: 8px;
-	cursor: pointer;
-	white-space: nowrap;
-	transition:
-		border-color 0.15s ease,
-		color 0.15s ease,
-		background 0.15s ease;
-}
-
-.view-toggle:hover {
+	font-family: var(--font-display);
+	font-size: 1rem;
+	font-weight: 800;
+	letter-spacing: -0.03em;
+	line-height: 1.1;
 	color: var(--fg);
-	border-color: color-mix(in srgb, var(--fg) 30%, var(--border));
-}
-
-.view-toggle.on {
-	border-color: var(--fg);
-	background: var(--fg);
-	color: #fff;
-}
-
-.step-mark {
-	flex-shrink: 0;
-	width: 1.5rem;
-	height: 1.5rem;
-	border-radius: 8px;
-	display: grid;
-	place-items: center;
-	font-size: 0.75rem;
-	font-weight: 800;
-	background: var(--fg);
-	color: #fff;
-}
-
-.card-titles {
-	min-width: 0;
-}
-
-.card-titles h3 {
-	margin: 0;
-	font-size: 0.95rem;
-	font-weight: 800;
-	letter-spacing: -0.02em;
-	line-height: 1.15;
 }
 
 .card-sub {
-	margin: 0.2rem 0 0;
-	font-size: 0.75rem;
-	line-height: 1.35;
+	margin: 0;
+	font-size: 0.68rem;
+	line-height: 1.3;
 	color: var(--muted);
 }
 
@@ -353,8 +290,28 @@ function openEditor() {
 .card-body {
 	flex: 1;
 	min-height: 0;
-	padding: 0.55rem 0.75rem 0.5rem;
-	overflow: hidden;
+	padding: 0.65rem 0.85rem 0.55rem;
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	scrollbar-width: thin;
+	scrollbar-color: color-mix(in srgb, var(--muted) 55%, transparent) transparent;
+	transition: opacity 0.25s ease;
+}
+
+.card-body.is-dimmed {
+	opacity: 0.35;
+	pointer-events: none;
+	user-select: none;
+}
+
+.card-body::-webkit-scrollbar {
+	width: 6px;
+}
+
+.card-body::-webkit-scrollbar-thumb {
+	background: var(--border);
+	border-radius: 999px;
 }
 
 .card-pane {
@@ -362,19 +319,6 @@ function openEditor() {
 	flex-direction: column;
 	gap: 0.5rem;
 	min-height: 0;
-}
-
-.card-swap-enter-active,
-.card-swap-leave-active {
-	transition:
-		opacity 0.18s ease,
-		transform 0.18s ease;
-}
-
-.card-swap-enter-from,
-.card-swap-leave-to {
-	opacity: 0;
-	transform: translateY(4px);
 }
 
 .provider-badge {
@@ -391,10 +335,22 @@ function openEditor() {
 	gap: 0.45rem;
 }
 
+.cred-stack :deep(.inp) {
+	border-radius: 12px;
+	background: #fff;
+	transition:
+		border-color 0.15s ease,
+		box-shadow 0.15s ease;
+}
+
+.cred-stack :deep(.inp:focus) {
+	box-shadow: 0 0 0 3px rgba(0, 0, 0, 0.06);
+}
+
 .hint-banner {
 	margin: 0;
-	padding: 0.45rem 0.55rem;
-	border-radius: 10px;
+	padding: 0.5rem 0.65rem;
+	border-radius: 12px;
 	font-size: 0.72rem;
 	line-height: 1.4;
 	color: var(--muted);
@@ -417,80 +373,140 @@ function openEditor() {
 	opacity: 0.75;
 }
 
-.server-pill {
-	margin: 0;
-	padding: 0.4rem 0.55rem;
-	border-radius: 10px;
-	font-size: 0.72rem;
-	font-weight: 600;
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	color: var(--fg);
-	background: #f0f0f0;
-	border: 1px solid var(--border);
-}
-
-.server-intro {
-	margin: 0;
-	font-size: 0.72rem;
-	line-height: 1.4;
-	color: var(--muted);
-}
-
-.server-fields {
-	display: flex;
-	flex-direction: column;
-	gap: 0.45rem;
-}
-
-.port-row {
-	display: grid;
-	grid-template-columns: 5.5rem 1fr;
-	gap: 0.45rem;
-	align-items: end;
-}
-
-.tls {
-	display: flex;
-	align-items: center;
-	gap: 0.45rem;
-	min-height: 2.5rem;
-	padding-bottom: 0.15rem;
-	font-size: 0.75rem;
-	color: var(--muted);
-	cursor: pointer;
-	white-space: nowrap;
-}
-
 .card-foot {
 	flex-shrink: 0;
-	padding: 0.5rem 0.75rem 0.65rem;
+	padding: 0.55rem 0.85rem 0.75rem;
 	border-top: 1px solid var(--border);
 	background: #fafafa;
 }
 
-.card.ok:not(.card-connected) .card-foot {
+.card.ok .card-foot {
 	background: #f7f7f7;
+}
+
+.verify-error {
+	margin: 0 0 0.65rem;
+	padding: 0.55rem 0.7rem;
+	font-size: 0.78rem;
+	line-height: 1.4;
+	color: #9f1239;
+	background: rgba(159, 18, 57, 0.08);
+	border: 1px solid rgba(159, 18, 57, 0.2);
+	border-radius: 10px;
 }
 
 .verify-btn {
 	width: 100%;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 0.45rem;
+	padding: 0.62rem 0.85rem;
+	border-radius: 12px;
+	border: 1.5px solid transparent;
+	font-family: var(--font-display);
+	font-size: 0.8125rem;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	line-height: 1.2;
+	cursor: pointer;
+	transition:
+		background 0.2s ease,
+		border-color 0.2s ease,
+		color 0.2s ease,
+		transform 0.15s ease,
+		box-shadow 0.2s ease;
 }
 
-.is-covered {
-	pointer-events: none;
-	user-select: none;
+.verify-btn.is-idle {
+	background: var(--fg);
+	color: #fff;
+	border-color: var(--fg);
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+}
+
+.verify-btn.is-idle:hover:not(:disabled) {
+	transform: translateY(-1px);
+	box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+}
+
+.verify-btn.is-idle:active:not(:disabled) {
+	transform: translateY(0);
+	box-shadow: 0 1px 6px rgba(0, 0, 0, 0.1);
+}
+
+.verify-btn.has-error.is-idle {
+	box-shadow: 0 0 0 3px rgba(159, 18, 57, 0.12);
+}
+
+.verify-btn.is-loading {
+	background: #1a1a1a;
+	color: rgba(255, 255, 255, 0.9);
+	border-color: #1a1a1a;
+	cursor: wait;
+}
+
+.verify-btn.is-ok {
+	background: #f4f8f2;
+	color: #2d3d2a;
+	border-color: #9eb896;
+}
+
+.verify-btn.is-ok:hover:not(:disabled) {
+	background: #eaf2e8;
+	border-color: #8aad82;
+}
+
+.verify-btn:disabled {
+	opacity: 1;
+	cursor: wait;
+}
+
+.verify-spin {
+	flex-shrink: 0;
+	width: 0.95rem;
+	height: 0.95rem;
+	border: 2px solid rgba(255, 255, 255, 0.35);
+	border-top-color: #fff;
+	border-radius: 50%;
+	animation: verify-spin 0.65s linear infinite;
+}
+
+.verify-check {
+	flex-shrink: 0;
+	width: 1.15rem;
+	height: 1.15rem;
+	border-radius: 50%;
+	display: grid;
+	place-items: center;
+	font-size: 0.65rem;
+	font-weight: 800;
+	line-height: 1;
+	background: #8aad82;
+	color: #fff;
+}
+
+.verify-text {
+	min-width: 0;
+}
+
+@keyframes verify-spin {
+	to {
+		transform: rotate(360deg);
+	}
 }
 
 .connected-overlay {
 	position: absolute;
 	inset: 0;
-	z-index: 5;
+	z-index: 6;
 	display: flex;
 	align-items: center;
 	justify-content: center;
 	padding: 1rem 0.85rem;
 	border-radius: inherit;
-	background: var(--connected-bg);
+	background: color-mix(in srgb, var(--surface) 94%, transparent);
+	backdrop-filter: blur(12px);
 }
 
 .connected-content {
@@ -499,38 +515,41 @@ function openEditor() {
 	flex-direction: column;
 	align-items: center;
 	text-align: center;
-	gap: 0.35rem;
+	gap: 0.45rem;
 }
 
-.connected-side {
-	margin: 0 0 0.25rem;
-	font-size: 0.65rem;
-	font-weight: 700;
-	text-transform: uppercase;
-	letter-spacing: 0.12em;
-	color: var(--connected-muted);
+.connected-role {
+	margin: 0;
+	font-family: var(--font-display);
+	font-size: 1rem;
+	font-weight: 800;
+	letter-spacing: -0.03em;
+	color: var(--fg);
 }
 
-.connected-mark {
-	width: 4.5rem;
-	height: 4.5rem;
-	margin: 0.15rem 0;
+.connected-check {
+	width: 2.75rem;
+	height: 2.75rem;
 	border-radius: 50%;
 	display: grid;
 	place-items: center;
-	font-size: 2.25rem;
-	font-weight: 800;
-	line-height: 1;
-	background: #fff;
-	color: var(--connected-fg);
+	color: #fff;
+	background: #8aad82;
+	box-shadow: 0 0 0 6px rgba(138, 173, 130, 0.22);
+}
+
+.connected-check svg {
+	width: 1.35rem;
+	height: 1.35rem;
 }
 
 .connected-title {
-	margin: 0.1rem 0 0;
-	font-size: 1.25rem;
+	margin: 0.15rem 0 0;
+	font-family: var(--font-display);
+	font-size: 1.15rem;
 	font-weight: 800;
 	letter-spacing: -0.03em;
-	color: var(--connected-fg);
+	color: var(--fg);
 }
 
 .connected-email {
@@ -539,43 +558,111 @@ function openEditor() {
 	font-size: 0.8rem;
 	font-weight: 600;
 	line-height: 1.35;
-	color: var(--connected-fg);
+	color: var(--fg);
 	word-break: break-word;
 }
 
-.connected-server {
+.connected-provider {
 	margin: 0;
-	width: 100%;
 	font-size: 0.68rem;
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-weight: 500;
-	color: var(--connected-muted);
+	font-weight: 700;
+	color: var(--muted);
 }
 
-.make-changes-btn {
-	margin-top: 0.65rem;
-	padding: 0;
-	border: none;
-	background: none;
+.connected-change-btn {
+	margin-top: 0.45rem;
+	width: 100%;
+	padding: 0.58rem 0.75rem;
+	border: 1.5px solid var(--border);
+	border-radius: 12px;
+	background: var(--bg);
+	font-family: var(--font-display);
 	font-size: 0.78rem;
 	font-weight: 700;
-	color: var(--connected-muted);
-	text-decoration: underline;
-	text-underline-offset: 3px;
+	color: var(--fg);
 	cursor: pointer;
+	transition:
+		background 0.15s ease,
+		border-color 0.15s ease,
+		transform 0.15s ease;
 }
 
-.make-changes-btn:hover {
-	color: var(--connected-fg);
+.connected-change-btn:hover {
+	background: #fff;
+	border-color: color-mix(in srgb, var(--fg) 22%, var(--border));
+	transform: translateY(-1px);
 }
 
-.overlay-fade-enter-active,
-.overlay-fade-leave-active {
-	transition: opacity 0.15s ease;
+.connected-change-btn:active {
+	transform: translateY(0);
 }
 
-.overlay-fade-enter-from,
-.overlay-fade-leave-to {
+.connected-enter-active {
+	transition: opacity 0.28s ease;
+}
+
+.connected-leave-active {
+	transition: opacity 0.2s ease;
+}
+
+.connected-enter-active .connected-content {
+	animation: connected-content-in 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.connected-leave-active .connected-content {
+	animation: connected-content-out 0.22s ease forwards;
+}
+
+.connected-enter-active .connected-check {
+	animation: connected-check-in 0.5s cubic-bezier(0.22, 1.25, 0.36, 1) 0.12s both;
+}
+
+.connected-enter-from,
+.connected-leave-to {
 	opacity: 0;
+}
+
+@keyframes connected-content-in {
+	from {
+		opacity: 0;
+		transform: translateY(14px);
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+	}
+}
+
+@keyframes connected-content-out {
+	from {
+		opacity: 1;
+		transform: translateY(0);
+	}
+
+	to {
+		opacity: 0;
+		transform: translateY(8px);
+	}
+}
+
+@keyframes connected-check-in {
+	from {
+		opacity: 0;
+		transform: scale(0.4);
+	}
+
+	to {
+		opacity: 1;
+		transform: scale(1);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.connected-enter-active .connected-content,
+	.connected-leave-active .connected-content,
+	.connected-enter-active .connected-check {
+		animation: none;
+	}
 }
 </style>

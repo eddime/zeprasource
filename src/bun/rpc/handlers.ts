@@ -11,6 +11,7 @@ import {
 	getMigrationProgressSnapshot,
 } from "../db/migration-repository";
 import {
+	clearMailboxProfiles,
 	loadMailboxProfileForDisplay,
 	saveMailboxProfile,
 } from "../services/imap/mailbox-profile";
@@ -39,7 +40,14 @@ import {
 	pauseMigration,
 	type ProgressEmitter,
 } from "../services/migration/migration-engine";
+import { runMigrationPreflight } from "../services/migration/migration-preflight";
 import type { MigrationProgress } from "../../shared/types";
+import {
+	createMigrationCheckout,
+	isMigrationCheckoutConfigured,
+	waitForMigrationCheckout,
+} from "../services/stripe/migration-checkout";
+import { getMigrationPricingCatalog } from "../services/stripe/migration-pricing-catalog";
 
 let progressEmitter: ProgressEmitter | null = null;
 let mainWindowRpc: ReturnType<typeof BrowserView.defineRPC<MailPortRPC>> | null = null;
@@ -79,8 +87,13 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 
 			getMailboxProfile: ({ role }) => loadMailboxProfileForDisplay(role),
 
-			estimateMigrationSize: async ({ source, folderPaths }) => {
-				return computeMigrationSize(source, folderPaths);
+			clearMailboxProfiles: () => {
+				clearMailboxProfiles();
+				return { success: true as const };
+			},
+
+			estimateMigrationSize: async ({ source, folderPaths, destination }) => {
+				return computeMigrationSize(source, folderPaths, destination);
 			},
 
 			fetchFolderStats: async ({ source, folderPaths }) => {
@@ -98,31 +111,32 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 				if (!progressEmitter) {
 					throw new Error("Progress bridge not initialized");
 				}
+				const verifiedLicense = await runMigrationPreflight(params);
+				let plannedSecondsTypical = params.plannedSecondsTypical;
 				if (
 					!params.resumeMigrationId &&
 					params.source &&
 					params.destination &&
-					params.folderMappings
+					params.folderMappings &&
+					plannedSecondsTypical === undefined
 				) {
 					const folderPaths = params.folderMappings
 						.filter((m: FolderMapping) => m.selected)
 						.map((m: FolderMapping) => m.sourcePath);
 					if (folderPaths.length > 0) {
-						const estimate = await computeMigrationSize(params.source, folderPaths);
-						const quota = await checkDestinationQuota(params.destination, {
-							bytes: estimate.totalBytes,
-							messages: estimate.messageCount,
-						});
-						if (
-							quota.status === "insufficient_storage" ||
-							quota.status === "insufficient_messages"
-						) {
-							throw new Error(quota.summary);
-						}
+						const estimate = await computeMigrationSize(
+							params.source,
+							folderPaths,
+							params.destination,
+						);
+						plannedSecondsTypical = estimate.secondsTypical;
 					}
 				}
 				try {
-					const migrationId = await enqueueMigration(params, progressEmitter);
+					const migrationId = await enqueueMigration(
+						{ ...params, plannedSecondsTypical, verifiedLicense },
+						progressEmitter,
+					);
 					return { migrationId };
 				} catch (error) {
 					if (error instanceof MigrationCapacityError) {
@@ -191,6 +205,21 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 					};
 				}
 			},
+
+			isStripeConfigured: () => ({
+				configured: isMigrationCheckoutConfigured(),
+			}),
+
+			createMigrationCheckout: (params) => createMigrationCheckout(params),
+
+			openMigrationCheckout: ({ checkoutUrl }) => ({
+				opened: Utils.openExternal(checkoutUrl),
+			}),
+
+			waitForMigrationCheckout: ({ sessionId }) =>
+				waitForMigrationCheckout(sessionId),
+
+			getMigrationPricingCatalog: () => getMigrationPricingCatalog(),
 		},
 		messages: {},
 	},

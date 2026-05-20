@@ -4,6 +4,7 @@ import {
 	loadMigrationResumePayload,
 	pauseMigrationForShutdown,
 } from "./migration-resume";
+import { assertMigrationResumeLicense } from "../stripe/migration-payment-entitlements";
 import {
 	enqueueMigration,
 	getActiveMigrationIds,
@@ -39,8 +40,13 @@ export function resumeInterruptedMigrations(emit: ProgressEmitter): void {
 				continue;
 			}
 
+			const folderPaths = payload.folderMappings
+				.filter((m) => m.selected)
+				.map((m) => m.sourcePath);
+
 			logger.info("migration", `Auto-resuming migration ${migrationId}`);
 			try {
+				await assertMigrationResumeLicense(migrationId, folderPaths);
 				await enqueueMigration(
 					{
 						resumeMigrationId: migrationId,

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, ref, watch } from "vue";
 import { storeToRefs } from "pinia";
 import onmoveBg from "@/assets/onmove-bg.png";
 import WelcomeStep from "../components/onboarding/WelcomeStep.vue";
@@ -12,9 +12,11 @@ import MigrationPricingStep from "../components/migration/MigrationPricingStep.v
 import AppButton from "../components/ui/AppButton.vue";
 import type { MigrationSizeEstimate } from "../../shared/types";
 import { isDestinationQuotaBlocked } from "../../shared/destination-quota";
+import type { PaidMigrationTierId } from "../../shared/stripe-checkout";
 import { getRpc } from "../lib/electrobun";
 import { useMailboxesStore } from "../stores/mailboxes";
 import { useMigrationStore } from "../stores/migration";
+import { usePricingStore } from "../stores/pricing";
 
 type Step = "welcome" | "setup" | "folders" | "pricing";
 
@@ -22,11 +24,15 @@ const step = ref<Step>("welcome");
 const estimatingSize = ref(false);
 const sizeEstimate = ref<MigrationSizeEstimate | null>(null);
 const pricingContinueLoading = ref(false);
+const pricingPaymentError = ref<string | null>(null);
+const stripeConfigured = ref(false);
 const estimateError = ref<string | null>(null);
 const quotaWarning = ref<string | null>(null);
+const plannedDurationHint = ref<string | null>(null);
 
 const mailboxes = useMailboxesStore();
 const migration = useMigrationStore();
+const pricing = usePricingStore();
 
 const {
 	source,
@@ -85,7 +91,10 @@ const zebraState = computed((): ZebraState => {
 const headline = computed(() => {
 	const status = progress.value?.status;
 	if (running.value || status === "running") return "Your zebra is on the move…";
-	if (status === "paused") return "Migration paused";
+	if (status === "paused") {
+		if ((progress.value?.messagesFailed ?? 0) > 0) return "Still finishing up…";
+		return "Migration paused";
+	}
 	if (status === "completed") return "Wow! Migration complete.";
 	if (status === "cancelled") return "Migration cancelled";
 	if (status === "failed") return "Oops — something went wrong.";
@@ -95,15 +104,17 @@ const headline = computed(() => {
 const progressLabel = computed(() => {
 	const p = progress.value;
 	if (!p) return "";
-	if (p.activityPhase === "retrying" || p.activityPhase === "reconnecting") {
+	if (
+		p.activityPhase === "retrying" ||
+		p.activityPhase === "reconnecting" ||
+		p.activityPhase === "throttled"
+	) {
 		return p.retryAfterMs
-			? `Retrying in ${Math.ceil(p.retryAfterMs / 1000)}s`
-			: "Retrying locally…";
+			? `Continuing in ${Math.ceil(p.retryAfterMs / 1000)}s`
+			: "Continuing automatically…";
 	}
-	if (p.activityPhase === "throttled") {
-		return p.retryAfterMs
-			? `Provider pause · ${Math.ceil(p.retryAfterMs / 1000)}s`
-			: "Provider is slowing us down";
+	if (p.remainingDurationLabel) {
+		return p.remainingDurationLabel;
 	}
 	if (p.messagesTotal > 0) {
 		return `${p.messagesCompleted} of ${p.messagesTotal} messages`;
@@ -122,11 +133,25 @@ const subline = computed(() => {
 	if (resuming.value || isCatchingUp.value) {
 		return "Picking up where we left off…";
 	}
+	if (
+		running.value ||
+		status === "running" ||
+		status === "paused"
+	) {
+		if (!progress.value?.remainingDurationLabel && plannedDurationHint.value) {
+			return `Expected ${plannedDurationHint.value} on your Mac`;
+		}
+	}
 	if (running.value || status === "running" || status === "paused") {
 		return `${progress.value?.messagesCompleted ?? 0} messages moved so far`;
 	}
 	if (status === "completed" && progress.value) {
-		return `${progress.value.messagesCompleted} messages · all processed locally`;
+		if (progress.value.activityLabel) return progress.value.activityLabel;
+		const failed = progress.value.messagesFailed;
+		if (failed > 0) {
+			return `${progress.value.messagesCompleted} moved · ${failed} could not be copied`;
+		}
+		return `${progress.value.messagesCompleted} messages · all moved on your Mac`;
 	}
 	if (status === "cancelled" && progress.value) {
 		return `${progress.value.messagesCompleted} messages moved before cancel`;
@@ -172,8 +197,13 @@ async function openSession(id: string) {
 	}
 }
 
-function goToSetup() {
+async function goToSetup() {
 	clearFinishedMigration();
+	estimateError.value = null;
+	quotaWarning.value = null;
+	plannedDurationHint.value = null;
+	sizeEstimate.value = null;
+	await mailboxes.resetForNewMigration();
 	step.value = "setup";
 }
 
@@ -181,6 +211,10 @@ async function goToFolders() {
 	if (!bothConnected.value) return;
 	step.value = "folders";
 	await mailboxes.loadFolderStats();
+}
+
+function backFromSetup() {
+	step.value = "welcome";
 }
 
 function backFromFolders() {
@@ -230,10 +264,12 @@ async function startMigration() {
 			.map((f) => f.sourcePath);
 		const estimate = await rpc.request.estimateMigrationSize({
 			source: source.value,
+			destination: destination.value,
 			folderPaths: selectedPaths,
 		});
 
 		await verifyDestinationQuota(estimate);
+		plannedDurationHint.value = `${estimate.durationLabel} (${estimate.durationRangeLabel})`;
 
 		if (estimate.requiresPayment) {
 			sizeEstimate.value = estimate;
@@ -241,7 +277,9 @@ async function startMigration() {
 			return;
 		}
 
-		await migration.start();
+		await migration.start(undefined, {
+			plannedSecondsTypical: estimate.secondsTypical,
+		});
 		step.value = "setup";
 	} catch (error) {
 		estimateError.value =
@@ -256,13 +294,65 @@ function backFromPricing() {
 	sizeEstimate.value = null;
 }
 
+watch(step, async (current) => {
+	if (current !== "pricing") return;
+	pricingPaymentError.value = null;
+	await pricing.ensureLoaded(true);
+	stripeConfigured.value = pricing.stripeLive;
+});
+
 async function confirmPricingAndMigrate() {
 	if (!sizeEstimate.value) return;
 	pricingContinueLoading.value = true;
+	pricingPaymentError.value = null;
+	plannedDurationHint.value = `${sizeEstimate.value.durationLabel} (${sizeEstimate.value.durationRangeLabel})`;
 	try {
-		await migration.start();
+		const tier = pricing.tierForBytes(sizeEstimate.value.totalBytes);
+		if (tier.id === "free") {
+			throw new Error("This migration is within the free limit.");
+		}
+
+		const tierId = tier.id as PaidMigrationTierId;
+		const folderPaths = folderMappings.value
+			.filter((f) => f.selected)
+			.map((f) => f.sourcePath);
+		const checkout = await getRpc().request.createMigrationCheckout({
+			tierId,
+			totalBytes: sizeEstimate.value.totalBytes,
+			messageCount: sizeEstimate.value.messageCount,
+			folderCount: folderPaths.length,
+			folderPaths,
+		});
+
+		if (!checkout.configured) {
+			throw new Error(
+				"Stripe is not set up yet. Add STRIPE_SECRET_KEY to mailport/.env and restart Zepra.",
+			);
+		}
+
+		const opened = await getRpc().request.openMigrationCheckout({
+			checkoutUrl: checkout.checkoutUrl,
+		});
+		if (!opened.opened) {
+			throw new Error("Could not open the browser for Stripe Checkout.");
+		}
+
+		const payment = await getRpc().request.waitForMigrationCheckout({
+			sessionId: checkout.sessionId,
+		});
+		if (!payment.paid) {
+			throw new Error(payment.error);
+		}
+
+		await migration.start(undefined, {
+			plannedSecondsTypical: sizeEstimate.value.secondsTypical,
+			launchTicket: payment.launchTicket,
+		});
 		step.value = "setup";
 		sizeEstimate.value = null;
+	} catch (error) {
+		pricingPaymentError.value =
+			error instanceof Error ? error.message : "Payment could not be completed";
 	} finally {
 		pricingContinueLoading.value = false;
 	}
@@ -274,8 +364,17 @@ function onDone() {
 	void migration.hydrateSessions();
 }
 
-function startAnotherMigration() {
+onMounted(() => {
+	void pricing.ensureLoaded();
+});
+
+async function startAnotherMigration() {
 	migration.resetFocused();
+	plannedDurationHint.value = null;
+	estimateError.value = null;
+	quotaWarning.value = null;
+	sizeEstimate.value = null;
+	await mailboxes.resetForNewMigration();
 	step.value = "setup";
 }
 </script>
@@ -315,6 +414,8 @@ function startAnotherMigration() {
 					class="step-view"
 					:estimate="sizeEstimate"
 					:loading="pricingContinueLoading"
+					:stripe-configured="stripeConfigured"
+					:payment-error="pricingPaymentError"
 					@back="backFromPricing"
 					@continue="confirmPricingAndMigrate"
 				/>
@@ -370,8 +471,8 @@ function startAnotherMigration() {
 					<SetupFoldersStep
 						v-else-if="step === 'folders'"
 						v-model:folder-mappings="folderMappings"
-						:source-email="source.email"
-						:dest-email="destination.email"
+						:source-provider="source.provider"
+						:dest-provider="destination.provider"
 						:loading-stats="loadingFolderStats"
 						:stats-error="folderStatsError"
 						:estimating-size="estimatingSize"
@@ -393,8 +494,11 @@ function startAnotherMigration() {
 						:testing-dest="testingDest"
 						:source-test-error="sourceTestError"
 						:dest-test-error="destTestError"
+						@back="backFromSetup"
 						@verify-source="verifySource"
 						@verify-dest="verifyDest"
+						@credentials-edited-source="sourceValidated = false"
+						@credentials-edited-dest="destValidated = false"
 						@apply-source="mailboxes.applyLocalTestSource()"
 						@apply-dest="mailboxes.applyLocalTestDest()"
 						@apply-cloud="onCloudTestMailboxes"

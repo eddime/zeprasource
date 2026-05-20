@@ -5,6 +5,7 @@ export default {
 		name: "Zepra",
 		identifier: "dev.zepra.app",
 		version: "0.1.0",
+		urlSchemes: ["zepra"],
 	},
 	build: {
 		copy: {

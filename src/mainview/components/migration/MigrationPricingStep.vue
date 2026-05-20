@@ -1,13 +1,17 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted } from "vue";
+import stripeWordmark from "@/assets/stripe-wordmark.svg";
 import type { MigrationSizeEstimate } from "../../../shared/types";
-import { formatBytes, getPricingTier } from "../../../shared/pricing";
+import { formatBytes } from "../../../shared/pricing";
+import { usePricingStore } from "../../stores/pricing";
 import ZebraMascot from "../zebra/ZebraMascot.vue";
 import AppButton from "../ui/AppButton.vue";
 
 const props = defineProps<{
 	estimate: MigrationSizeEstimate;
 	loading?: boolean;
+	stripeConfigured?: boolean;
+	paymentError?: string | null;
 }>();
 
 defineEmits<{
@@ -15,10 +19,22 @@ defineEmits<{
 	continue: [];
 }>();
 
-const tier = computed(() => getPricingTier(props.estimate.totalBytes));
+const pricing = usePricingStore();
+
+onMounted(() => {
+	void pricing.ensureLoaded(true);
+});
+
+const tier = computed(() => pricing.tierForBytes(props.estimate.totalBytes));
 const overLimitGb = computed(
 	() => props.estimate.totalBytes / (1024 ** 3) - props.estimate.freeLimitBytes / (1024 ** 3),
 );
+
+const continueLabel = computed(() => {
+	if (props.loading) return "Waiting for payment…";
+	if (props.stripeConfigured === false) return "Set up Stripe to continue";
+	return `Pay ${tier.value.priceLabel} with Stripe`;
+});
 </script>
 
 <template>
@@ -28,13 +44,18 @@ const overLimitGb = computed(
 		<p class="lead">
 			We measured <strong>{{ formatBytes(estimate.totalBytes) }}</strong> across
 			{{ estimate.messageCount }} messages in {{ estimate.folders.length }} folders.
-			Choose a plan to continue — migration still runs locally on your computer.
+			Usually takes <strong>{{ estimate.durationLabel }}</strong>
+			({{ estimate.durationRangeLabel }}) on your Mac.
 		</p>
 
 		<div class="size-card">
 			<div class="row">
 				<span>Total size</span>
 				<strong>{{ formatBytes(estimate.totalBytes) }}</strong>
+			</div>
+			<div class="row muted">
+				<span>Estimated time</span>
+				<span>{{ estimate.durationLabel }}</span>
 			</div>
 			<div class="row muted">
 				<span>Free limit</span>
@@ -47,9 +68,9 @@ const overLimitGb = computed(
 		</div>
 
 		<article class="plan featured">
-			<p class="plan-tag">Recommended</p>
+			<p class="plan-tag">Selected for your size</p>
 			<h3>{{ tier.name }}</h3>
-			<p class="price">{{ tier.priceLabel }}</p>
+			<p class="price">{{ tier.priceLabel }} <span class="price-once">once</span></p>
 			<p class="plan-hint">{{ tier.hint }}</p>
 			<ul>
 				<li>Unlimited folders in this migration</li>
@@ -58,15 +79,37 @@ const overLimitGb = computed(
 			</ul>
 		</article>
 
-		<p class="note">
-			Payment is not wired yet — this screen previews pricing. Tap continue to start
-			the migration anyway during beta.
+		<div class="stripe-trust">
+			<img
+				class="stripe-logo"
+				:src="stripeWordmark"
+				width="52"
+				height="22"
+				alt="Stripe"
+				decoding="async"
+			/>
+			<p class="stripe-copy">
+				One-time checkout in your browser — powered by Stripe. Zepra opens again when
+				payment succeeds.
+			</p>
+		</div>
+
+		<p v-if="stripeConfigured === false" class="note warn">
+			Add <code>STRIPE_SECRET_KEY</code> to <code>mailport/.env</code> and restart Zepra.
 		</p>
+		<p v-else-if="paymentError" class="note error">{{ paymentError }}</p>
 
 		<div class="actions">
-			<AppButton variant="secondary" block @click="$emit('back')">Back</AppButton>
-			<AppButton block :loading="loading" @click="$emit('continue')">
-				Continue with {{ tier.name }} — {{ tier.priceLabel }}
+			<AppButton variant="secondary" block :disabled="loading" @click="$emit('back')">
+				Back
+			</AppButton>
+			<AppButton
+				block
+				:loading="loading"
+				:disabled="stripeConfigured === false"
+				@click="$emit('continue')"
+			>
+				{{ continueLabel }}
 			</AppButton>
 		</div>
 	</div>
@@ -154,6 +197,11 @@ h2 {
 	font-weight: 700;
 	letter-spacing: -0.03em;
 }
+.price-once {
+	font-size: 0.85rem;
+	font-weight: 600;
+	color: var(--muted);
+}
 .plan-hint {
 	margin: 0.15rem 0 0.6rem;
 	font-size: 0.75rem;
@@ -166,11 +214,40 @@ h2 {
 	color: var(--muted);
 	line-height: 1.45;
 }
+.stripe-trust {
+	width: 100%;
+	display: flex;
+	align-items: center;
+	gap: 0.55rem;
+	padding: 0.5rem 0.65rem;
+	border-radius: var(--radius-card);
+	border: 1px solid var(--border);
+	background: var(--surface);
+	text-align: left;
+}
+.stripe-logo {
+	flex-shrink: 0;
+	opacity: 0.85;
+}
+.stripe-copy {
+	margin: 0;
+	font-size: 0.68rem;
+	color: var(--muted);
+	line-height: 1.35;
+}
 .note {
 	margin: 0;
 	font-size: 0.7rem;
-	color: var(--muted-light);
 	line-height: 1.35;
+}
+.note.warn {
+	color: var(--muted);
+}
+.note.warn code {
+	font-size: 0.65rem;
+}
+.note.error {
+	color: #b42318;
 }
 .actions {
 	width: 100%;

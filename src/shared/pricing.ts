@@ -1,7 +1,12 @@
 /**
  * Tier limits (GB). Logic: ≤10 Trot, ≤25 Gallop, >25 Stampede.
- * Stampede price is a decoy anchor — most revenue is Trot + Gallop.
+ * Prices are loaded from Stripe at runtime — see migration-pricing-catalog.
  */
+import type {
+	MigrationPriceLabels,
+	MigrationPricingPlan,
+} from "./migration-pricing-catalog";
+
 export const PRICING_TIER_LIMITS_GB = {
 	free: 2,
 	starter: 10,
@@ -9,11 +14,19 @@ export const PRICING_TIER_LIMITS_GB = {
 	pro: 25,
 } as const;
 
-/** Charm pricing: under €10 / €15 / €35 barriers. */
-export const PRICING_TIER_PRICES = {
+/** Used when Stripe is unavailable (offline / missing key). */
+export const FALLBACK_MIGRATION_PRICE_LABELS: MigrationPriceLabels = {
+	free: "€0",
 	starter: "€9",
 	plus: "€14",
 	pro: "€32",
+};
+
+/** @deprecated Use FALLBACK_MIGRATION_PRICE_LABELS */
+export const PRICING_TIER_PRICES = {
+	starter: FALLBACK_MIGRATION_PRICE_LABELS.starter,
+	plus: FALLBACK_MIGRATION_PRICE_LABELS.plus,
+	pro: FALLBACK_MIGRATION_PRICE_LABELS.pro,
 } as const;
 
 export const FREE_MIGRATION_LIMIT_BYTES = PRICING_TIER_LIMITS_GB.free * 1024 ** 3;
@@ -27,12 +40,12 @@ export interface MigrationPricingTier {
 	tagline?: string;
 }
 
-/** Static plans for marketing / pricing sheet (matches getPricingTier thresholds). */
-export const PRICING_PLANS: Array<MigrationPricingTier & { sizeLabel: string }> = [
+const TIER_PLAN_META: Array<
+	Omit<MigrationPricingPlan, "priceLabel"> & { id: keyof MigrationPriceLabels }
+> = [
 	{
 		id: "free",
 		name: "Foal",
-		priceLabel: "€0",
 		tagline: "First steps on the savanna",
 		hint: "Up to 2 GB per migration",
 		sizeLabel: `Up to ${PRICING_TIER_LIMITS_GB.free} GB`,
@@ -40,7 +53,6 @@ export const PRICING_PLANS: Array<MigrationPricingTier & { sizeLabel: string }> 
 	{
 		id: "starter",
 		name: "Trot",
-		priceLabel: PRICING_TIER_PRICES.starter,
 		tagline: "Everyday mailbox crossing",
 		hint: "One-time · less than a coffee",
 		sizeLabel: `Up to ${PRICING_TIER_LIMITS_GB.starter} GB`,
@@ -48,7 +60,6 @@ export const PRICING_PLANS: Array<MigrationPricingTier & { sizeLabel: string }> 
 	{
 		id: "plus",
 		name: "Gallop",
-		priceLabel: PRICING_TIER_PRICES.plus,
 		tagline: "Full herd of folders",
 		hint: "One-time · best value per GB",
 		sizeLabel: `Up to ${PRICING_TIER_LIMITS_GB.plus} GB`,
@@ -56,12 +67,23 @@ export const PRICING_PLANS: Array<MigrationPricingTier & { sizeLabel: string }> 
 	{
 		id: "pro",
 		name: "Stampede",
-		priceLabel: PRICING_TIER_PRICES.pro,
 		tagline: "The great migration",
 		hint: "One-time · decade of mail",
 		sizeLabel: `Over ${PRICING_TIER_LIMITS_GB.pro} GB`,
 	},
 ];
+
+export function buildPricingPlans(
+	priceLabels: MigrationPriceLabels = FALLBACK_MIGRATION_PRICE_LABELS,
+): MigrationPricingPlan[] {
+	return TIER_PLAN_META.map((plan) => ({
+		...plan,
+		priceLabel: priceLabels[plan.id],
+	}));
+}
+
+/** @deprecated Prefer buildPricingPlans() with live Stripe labels from the pricing store. */
+export const PRICING_PLANS = buildPricingPlans();
 
 export function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
@@ -74,17 +96,18 @@ export function requiresPaidPlan(totalBytes: number): boolean {
 	return totalBytes > FREE_MIGRATION_LIMIT_BYTES;
 }
 
-/** Simple tier for display — payment integration can hook into tier.id later. */
-export function getPricingTier(totalBytes: number): MigrationPricingTier {
+export function getPricingTier(
+	totalBytes: number,
+	priceLabels: MigrationPriceLabels = FALLBACK_MIGRATION_PRICE_LABELS,
+): MigrationPricingTier {
 	const gb = totalBytes / 1024 ** 3;
 	const { free, starter, plus, pro } = PRICING_TIER_LIMITS_GB;
-	const prices = PRICING_TIER_PRICES;
 
 	if (gb <= free) {
 		return {
 			id: "free",
 			name: "Foal",
-			priceLabel: "€0",
+			priceLabel: priceLabels.free,
 			hint: `Up to ${free} GB per migration`,
 		};
 	}
@@ -92,7 +115,7 @@ export function getPricingTier(totalBytes: number): MigrationPricingTier {
 		return {
 			id: "starter",
 			name: "Trot",
-			priceLabel: prices.starter,
+			priceLabel: priceLabels.starter,
 			tagline: "Everyday mailbox crossing",
 			hint: "One-time migration license",
 		};
@@ -101,7 +124,7 @@ export function getPricingTier(totalBytes: number): MigrationPricingTier {
 		return {
 			id: "plus",
 			name: "Gallop",
-			priceLabel: prices.plus,
+			priceLabel: priceLabels.plus,
 			tagline: "Full herd of folders",
 			hint: "One-time migration license",
 		};
@@ -109,7 +132,7 @@ export function getPricingTier(totalBytes: number): MigrationPricingTier {
 	return {
 		id: "pro",
 		name: "Stampede",
-		priceLabel: prices.pro,
+		priceLabel: priceLabels.pro,
 		tagline: "The great migration",
 		hint: "Large mailbox · one-time license",
 	};

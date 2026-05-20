@@ -1,11 +1,15 @@
 <script setup lang="ts">
+import { watch } from "vue";
 import stripeWordmark from "@/assets/stripe-wordmark.svg";
-import {
-	PRICING_PLANS,
-	PRICING_TIER_LIMITS_GB,
-} from "../../../shared/pricing";
+import { PRICING_TIER_LIMITS_GB } from "../../../shared/pricing";
+import { usePricingStore } from "../../stores/pricing";
 
 const open = defineModel<boolean>("open", { default: false });
+const pricing = usePricingStore();
+
+watch(open, (isOpen) => {
+	if (isOpen) void pricing.ensureLoaded();
+});
 
 function close() {
 	open.value = false;
@@ -95,9 +99,11 @@ function close() {
 						</p>
 					</header>
 
-					<ul class="plans">
+					<p v-if="pricing.loading" class="plans-loading">Loading prices from Stripe…</p>
+
+					<ul class="plans" :class="{ 'is-loading': pricing.loading }">
 						<li
-							v-for="plan in PRICING_PLANS"
+							v-for="plan in pricing.plans"
 							:key="plan.id"
 							class="plan"
 							:class="[
@@ -266,6 +272,18 @@ h2 {
 .lead strong {
 	color: var(--fg);
 	font-weight: 600;
+}
+
+.plans-loading {
+	margin: 0;
+	font-size: 0.72rem;
+	color: var(--muted);
+	text-align: center;
+}
+
+.plans.is-loading {
+	opacity: 0.55;
+	pointer-events: none;
 }
 
 .plans {

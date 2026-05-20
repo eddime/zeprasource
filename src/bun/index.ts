@@ -25,6 +25,7 @@ import { setupMigrationCloseGuard } from "./migration-close-guard";
 import { setupApplicationMenu } from "./setup-application-menu";
 import { getProgressEmitter, mailportRpc, setProgressBridge } from "./rpc/handlers";
 import { resumeInterruptedMigrations } from "./services/migration/migration-orchestrator";
+import { setupPaymentUrlHandler } from "./services/stripe/setup-payment-url-handler";
 import { logger } from "./utils/logger";
 
 const DEV_SERVER_PORT = 5180;
@@ -56,6 +57,7 @@ async function getMainViewUrl(): Promise<string> {
 
 getDatabase();
 setupApplicationMenu();
+setupPaymentUrlHandler();
 
 const url = await getMainViewUrl();
 
