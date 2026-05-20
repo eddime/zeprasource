@@ -268,20 +268,31 @@ export function markMigrationMessage(
 	sizeBytes: number,
 	messageId?: string,
 	error?: string,
+	retryCount = 0,
 ): void {
 	database
 		.prepare(
 			`INSERT INTO migration_messages (
-      migration_id, source_folder, source_uid, message_id, status, size_bytes, error, transferred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      migration_id, source_folder, source_uid, message_id, status, size_bytes, error, retry_count, transferred_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(migration_id, source_folder, source_uid) DO UPDATE SET
       status = excluded.status,
       size_bytes = excluded.size_bytes,
       message_id = excluded.message_id,
       error = excluded.error,
+      retry_count = excluded.retry_count,
       transferred_at = excluded.transferred_at`,
 		)
-		.run(migrationId, folder, uid, messageId ?? null, status, sizeBytes, error ?? null);
+		.run(
+			migrationId,
+			folder,
+			uid,
+			messageId ?? null,
+			status,
+			sizeBytes,
+			error ?? null,
+			retryCount,
+		);
 }
 
 export function markFolderCompleted(migrationId: string, sourcePath: string): void {

@@ -1,5 +1,6 @@
 import type { MailboxCredentials } from "../../../shared/types";
 import { PROVIDER_PRESETS } from "../../../shared/types";
+import { classifyMigrationError } from "../migration/migration-errors";
 
 const OUTLOOK_CONSUMER_DOMAINS = [
 	"outlook.com",
@@ -110,12 +111,10 @@ export function formatImapError(
 	}
 
 	const err = error as ImapError;
+	const classification = classifyMigrationError(error);
 	const responseText = err.responseText?.trim();
 	const authFailed =
-		Boolean(err.authenticationFailed) ||
-		/AUTHENTICATIONFAILED|Invalid credentials|LOGIN failed|Authentication failed/i.test(
-			`${responseText ?? ""} ${err.message}`,
-		);
+		classification.kind === "auth";
 
 	if (authFailed) {
 		if (/dreamhost/i.test(credentials.host)) {
@@ -169,6 +168,10 @@ export function formatImapError(
 			`Connection to ${credentials.host} timed out. Check host, port, TLS, and your network — ` +
 			"or try again in a moment."
 		);
+	}
+
+	if (classification.kind === "throttled") {
+		return classification.userMessage;
 	}
 
 	if (responseText) return responseText;

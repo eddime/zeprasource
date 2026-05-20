@@ -114,7 +114,7 @@ describe("migration-repository", () => {
       ) VALUES (?, 's', 'd', 'a@test.com', 'b@test.com', 'running', 1, datetime('now'), datetime('now'))`,
 		).run(migrationId);
 
-		markMigrationMessage(db, migrationId, "INBOX", 42, "failed", 0, undefined, "boom");
+		markMigrationMessage(db, migrationId, "INBOX", 42, "failed", 0, undefined, "boom", 1);
 		markMigrationMessage(
 			db,
 			migrationId,
@@ -123,11 +123,13 @@ describe("migration-repository", () => {
 			"completed",
 			1234,
 			"<m@example.com>",
+			undefined,
+			2,
 		);
 
 		const row = db
 			.query(
-				`SELECT status, size_bytes, message_id, error
+				`SELECT status, size_bytes, message_id, error, retry_count
          FROM migration_messages
          WHERE migration_id = ? AND source_folder = 'INBOX' AND source_uid = 42`,
 			)
@@ -136,6 +138,7 @@ describe("migration-repository", () => {
 			size_bytes: number;
 			message_id: string | null;
 			error: string | null;
+			retry_count: number;
 		};
 
 		expect(row).toEqual({
@@ -143,6 +146,7 @@ describe("migration-repository", () => {
 			size_bytes: 1234,
 			message_id: "<m@example.com>",
 			error: null,
+			retry_count: 2,
 		});
 	});
 });
