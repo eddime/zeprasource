@@ -52,11 +52,15 @@ describe("mailbox-profile", () => {
 		expect(second.profileId).not.toBe(first.profileId);
 
 		const rows = getDatabase()
-			.query("SELECT email FROM mailbox_profiles WHERE role = 'source'")
-			.all() as Array<{ email: string }>;
-		expect(rows).toEqual([{ email: "new-source@example.com" }]);
+			.query("SELECT email, host, username FROM mailbox_profiles WHERE role = 'source'")
+			.all() as Array<{ email: string; host: string; username: string }>;
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.email).not.toContain("new-source@example.com");
+		expect(rows[0]?.host).not.toContain("imap.example.com");
+		expect(rows[0]?.username).not.toContain("source@example.com");
 
 		expect(loadMailboxCredentialsByRole("source")?.password).toBe("new-password");
+		expect(loadMailboxCredentialsByRole("source")?.email).toBe("new-source@example.com");
 		expect(loadMailboxProfileForDisplay("source")?.password).toBeUndefined();
 	});
 });

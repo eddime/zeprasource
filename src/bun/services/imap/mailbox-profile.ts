@@ -5,6 +5,7 @@ import {
 	createCredentialRef,
 	credentialStore,
 } from "../credentials/credential-store";
+import { decryptString, encryptString } from "../crypto/local-secrets";
 
 export type MailboxRole = "source" | "destination";
 
@@ -30,15 +31,18 @@ function persistSecret(credentials: MailboxCredentials): string {
 function loadCredentialsFromProfile(row: StoredProfile): MailboxCredentials | null {
 	const secret = credentialStore.retrieve(row.credential_ref);
 	if (secret === null) return null;
+	const email = decryptString(row.email);
+	const host = decryptString(row.host);
+	if (!email || !host) return null;
 
 	return {
 		provider: row.provider as MailboxCredentials["provider"],
-		email: row.email,
-		host: row.host,
+		email,
+		host,
 		port: row.port,
 		secure: Boolean(row.secure),
 		authMethod: row.auth_method as MailboxCredentials["authMethod"],
-		username: row.username ?? undefined,
+		username: decryptString(row.username) ?? undefined,
 		password: secret,
 	};
 }
@@ -67,12 +71,12 @@ export function saveMailboxProfile(
 		profileId,
 		role,
 		credentials.provider,
-		credentials.email,
-		credentials.host,
+		encryptString(credentials.email),
+		encryptString(credentials.host),
 		credentials.port,
 		credentials.secure ? 1 : 0,
 		credentials.authMethod,
-		credentials.username ?? null,
+		encryptString(credentials.username ?? null),
 		credentialRef,
 	);
 
