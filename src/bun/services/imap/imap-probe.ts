@@ -115,9 +115,11 @@ export async function pickVerifiedCandidate<T extends { host: string; port: numb
 		email: string;
 		password?: string;
 		toCredentials: (c: T) => MailboxCredentials;
+		/** Shorter timeout during autodiscovery (many hosts may be probed). */
+		bannerTimeoutMs?: number;
 	},
 ): Promise<T | null> {
-	const { email, password, toCredentials } = options;
+	const { email, password, toCredentials, bannerTimeoutMs = 5_000 } = options;
 	const trimmedPassword = password?.trim();
 
 	if (trimmedPassword) {
@@ -150,7 +152,12 @@ export async function pickVerifiedCandidate<T extends { host: string; port: numb
 		const probes = await Promise.all(
 			batch.map(async (candidate) => ({
 				candidate,
-				live: await probeImapBanner(candidate.host, candidate.port, candidate.secure),
+				live: await probeImapBanner(
+					candidate.host,
+					candidate.port,
+					candidate.secure,
+					bannerTimeoutMs,
+				),
 			})),
 		);
 		const hit = probes.find((p) => p.live);

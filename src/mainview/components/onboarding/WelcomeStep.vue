@@ -7,6 +7,7 @@ import AppDock from "../ui/AppDock.vue";
 import PricingSheet from "../pricing/PricingSheet.vue";
 import SessionRail from "../sessions/SessionRail.vue";
 import PerkIcon, { type PerkIconKind } from "./PerkIcon.vue";
+import { BACKUP_COPY } from "../../../shared/backup-copy";
 import { useMigrationStore } from "../../stores/migration";
 
 const emit = defineEmits<{
@@ -34,6 +35,7 @@ function onSelectSession(id: string) {
 }
 
 const perks: Array<{ icon: PerkIconKind; title: string; text: string }> = [
+	{ icon: "backup", title: BACKUP_COPY.welcomePerkTitle, text: BACKUP_COPY.welcomePerkText },
 	{ icon: "mac", title: "On your device", text: "Mail stays local." },
 	{ icon: "direct", title: "No cloud relay", text: "IMAP to IMAP." },
 	{ icon: "resume", title: "Resume anytime", text: "Continue later." },
@@ -89,7 +91,7 @@ const perks: Array<{ icon: PerkIconKind; title: string; text: string }> = [
 			<div class="copy">
 				<h1 class="title anim" style="--i: 1">Zepra</h1>
 				<p class="sub anim" style="--i: 2">
-					Move your mailbox locally - safe, private first, simple, offline-ready.
+					Migrate IMAP to IMAP on your Mac — with a free local backup while you move.
 				</p>
 
 				<ul class="perks anim" style="--i: 3">

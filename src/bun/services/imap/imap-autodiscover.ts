@@ -11,6 +11,11 @@ import { resolveOutlookHost } from "./credentials";
 export { detectProviderFromEmail } from "../../../shared/mailbox-provider";
 import { pickVerifiedCandidate } from "./imap-probe";
 
+/** Discovery fetches — kept short; wrong hosts fail fast in parallel probes. */
+const AUTOCONFIG_FETCH_MS = 4_000;
+const TLS_CERT_PROBE_MS = 4_000;
+const DISCOVERY_BANNER_PROBE_MS = 3_500;
+
 export type ImapDiscoverySource =
 	| "preset"
 	| "thunderbird"
@@ -179,7 +184,7 @@ async function readMailSubdomainCert(domain: string): Promise<string | null> {
 				}
 			},
 		);
-		socket.setTimeout(6_000, () => {
+		socket.setTimeout(TLS_CERT_PROBE_MS, () => {
 			socket.destroy();
 			resolve(null);
 		});
@@ -217,7 +222,7 @@ async function fetchThunderbirdAutoconfig(
 ): Promise<Omit<ImapDiscoveryResult, "provider" | "verified"> | null> {
 	try {
 		const res = await fetch(`https://autoconfig.thunderbird.net/v1.1/${domain}`, {
-			signal: AbortSignal.timeout(8_000),
+			signal: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
 			headers: { Accept: "application/xml,text/xml" },
 		});
 		if (!res.ok) return null;
@@ -237,21 +242,22 @@ async function fetchDomainAutoconfig(
 		`https://mail.${domain}/mail/config-v1.1.xml`,
 	];
 
-	for (const url of urls) {
-		try {
-			const res = await fetch(url, {
-				signal: AbortSignal.timeout(8_000),
-				headers: { Accept: "application/xml,text/xml" },
-			});
-			if (!res.ok) continue;
-			const xml = await res.text();
-			const parsed = parseMozillaAutoconfig(xml, "autoconfig");
-			if (parsed) return parsed;
-		} catch {
-			/* try next URL */
-		}
-	}
-	return null;
+	const fetches = await Promise.all(
+		urls.map(async (url) => {
+			try {
+				const res = await fetch(url, {
+					signal: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
+					headers: { Accept: "application/xml,text/xml" },
+				});
+				if (!res.ok) return null;
+				const xml = await res.text();
+				return parseMozillaAutoconfig(xml, "autoconfig");
+			} catch {
+				return null;
+			}
+		}),
+	);
+	return fetches.find((parsed) => parsed !== null) ?? null;
 }
 
 async function resolveMxHosts(domain: string): Promise<string[]> {
@@ -297,18 +303,23 @@ async function candidatesFromMx(
 	}
 
 	if (usesMailchannels(mxHosts)) {
-		for (const hosting of SHARED_HOSTING_IMAP) {
-			if (await hostResolves(hosting.host)) {
-				out.push({
-					host: hosting.host,
-					port: hosting.port,
-					secure: hosting.secure,
-					provider: "generic",
-					source: "mx",
-					verified: false,
-					priority: 32,
-				});
-			}
+		const hostingChecks = await Promise.all(
+			SHARED_HOSTING_IMAP.map(async (hosting) => ({
+				hosting,
+				resolves: await hostResolves(hosting.host),
+			})),
+		);
+		for (const { hosting, resolves } of hostingChecks) {
+			if (!resolves) continue;
+			out.push({
+				host: hosting.host,
+				port: hosting.port,
+				secure: hosting.secure,
+				provider: "generic",
+				source: "mx",
+				verified: false,
+				priority: 32,
+			});
 		}
 	}
 
@@ -320,17 +331,24 @@ async function candidatesFromSharedHosting(
 ): Promise<ImapDiscoveryCandidate[]> {
 	const imapSub = `imap.${domain}`;
 	const mailSub = `mail.${domain}`;
-	const imapExists = await hostResolves(imapSub);
-	const mailExists = await hostResolves(mailSub);
+	const [imapExists, mailExists] = await Promise.all([
+		hostResolves(imapSub),
+		hostResolves(mailSub),
+	]);
 	if (imapExists || !mailExists) return [];
 
 	const out: ImapDiscoveryCandidate[] = [];
 	const certText = await readMailSubdomainCert(domain);
 
 	if (certText) {
-		for (const hosting of SHARED_HOSTING_IMAP) {
-			if (!hosting.certMatch.test(certText)) continue;
-			if (!(await hostResolves(hosting.host))) continue;
+		const hostingResolvable = await Promise.all(
+			SHARED_HOSTING_IMAP.map(async (hosting) => ({
+				hosting,
+				resolves: await hostResolves(hosting.host),
+			})),
+		);
+		for (const { hosting, resolves } of hostingResolvable) {
+			if (!resolves || !hosting.certMatch.test(certText)) continue;
 			out.push({
 				host: hosting.host,
 				port: hosting.port,
@@ -346,48 +364,56 @@ async function candidatesFromSharedHosting(
 	return out;
 }
 
-async function candidatesFromSrv(domain: string): Promise<ImapDiscoveryCandidate[]> {
-	const out: ImapDiscoveryCandidate[] = [];
-	for (const name of [`_imaps._tcp.${domain}`, `_imap._tcp.${domain}`]) {
-		try {
-			const records = await dns.resolveSrv(name);
-			const sorted = [...records].sort(
-				(a, b) => a.priority - b.priority || b.weight - a.weight,
-			);
-			const best = sorted[0];
-			if (!best?.name) continue;
-			const secure = name.startsWith("_imaps");
-			out.push({
-				host: best.name.replace(/\.$/, ""),
-				port: best.port || (secure ? 993 : 143),
-				secure,
-				provider: "generic",
-				source: "srv",
-				verified: false,
-				priority: 15,
-			});
-		} catch {
-			/* no SRV */
-		}
+async function resolveSrvCandidate(
+	domain: string,
+	name: string,
+): Promise<ImapDiscoveryCandidate | null> {
+	try {
+		const records = await dns.resolveSrv(name);
+		const sorted = [...records].sort(
+			(a, b) => a.priority - b.priority || b.weight - a.weight,
+		);
+		const best = sorted[0];
+		if (!best?.name) return null;
+		const secure = name.startsWith("_imaps");
+		return {
+			host: best.name.replace(/\.$/, ""),
+			port: best.port || (secure ? 993 : 143),
+			secure,
+			provider: "generic",
+			source: "srv",
+			verified: false,
+			priority: 15,
+		};
+	} catch {
+		return null;
 	}
-	return out;
+}
+
+async function candidatesFromSrv(domain: string): Promise<ImapDiscoveryCandidate[]> {
+	const results = await Promise.all([
+		resolveSrvCandidate(domain, `_imaps._tcp.${domain}`),
+		resolveSrvCandidate(domain, `_imap._tcp.${domain}`),
+	]);
+	return results.filter((c): c is ImapDiscoveryCandidate => c !== null);
 }
 
 async function candidatesFromDnsGuesses(domain: string): Promise<ImapDiscoveryCandidate[]> {
-	const out: ImapDiscoveryCandidate[] = [];
-	for (const host of [`imap.${domain}`, `mail.${domain}`]) {
-		if (!(await hostResolves(host))) continue;
-		out.push({
+	const hosts = [`imap.${domain}`, `mail.${domain}`] as const;
+	const checks = await Promise.all(
+		hosts.map(async (host) => ({ host, ok: await hostResolves(host) })),
+	);
+	return checks
+		.filter((c) => c.ok)
+		.map(({ host }) => ({
 			host,
 			port: 993,
 			secure: true,
-			provider: "generic",
-			source: "guess",
+			provider: "generic" as const,
+			source: "guess" as const,
 			verified: false,
 			priority: host.startsWith("imap.") ? 40 : 45,
-		});
-	}
-	return out;
+		}));
 }
 
 function dedupeCandidates(candidates: ImapDiscoveryCandidate[]): ImapDiscoveryCandidate[] {
@@ -415,7 +441,15 @@ async function collectImapCandidates(
 		list.push({ ...preset, verified: false, priority: 0 });
 	}
 
-	const thunderbird = await fetchThunderbirdAutoconfig(domain);
+	const [thunderbird, autoconfig, srv, mx, hosting, guesses] = await Promise.all([
+		fetchThunderbirdAutoconfig(domain),
+		fetchDomainAutoconfig(domain),
+		candidatesFromSrv(domain),
+		candidatesFromMx(domain, trimmed),
+		candidatesFromSharedHosting(domain),
+		candidatesFromDnsGuesses(domain),
+	]);
+
 	if (thunderbird) {
 		list.push({
 			...thunderbird,
@@ -425,7 +459,6 @@ async function collectImapCandidates(
 		});
 	}
 
-	const autoconfig = await fetchDomainAutoconfig(domain);
 	if (autoconfig) {
 		list.push({
 			...autoconfig,
@@ -435,10 +468,7 @@ async function collectImapCandidates(
 		});
 	}
 
-	list.push(...(await candidatesFromSrv(domain)));
-	list.push(...(await candidatesFromMx(domain, trimmed)));
-	list.push(...(await candidatesFromSharedHosting(domain)));
-	list.push(...(await candidatesFromDnsGuesses(domain)));
+	list.push(...srv, ...mx, ...hosting, ...guesses);
 
 	return dedupeCandidates(list);
 }
@@ -458,8 +488,37 @@ export async function discoverImapSettings(
 	}
 
 	const known = detectProviderFromEmail(trimmed);
-	if (known && !options?.password?.trim()) {
+	const password = options?.password?.trim();
+
+	if (known && !password) {
 		return presetForProvider(known, trimmed);
+	}
+
+	if (known && password) {
+		const preset = presetForProvider(known, trimmed);
+		const presetCandidate: ImapDiscoveryCandidate = {
+			...preset,
+			verified: false,
+			priority: 0,
+		};
+		const presetVerified = await pickVerifiedCandidate([presetCandidate], {
+			email: trimmed,
+			password,
+			bannerTimeoutMs: DISCOVERY_BANNER_PROBE_MS,
+			toCredentials: (c) => ({
+				provider: c.provider,
+				email: trimmed,
+				host: c.host,
+				port: c.port,
+				secure: c.secure,
+				authMethod: "password",
+				password,
+			}),
+		});
+		if (presetVerified) {
+			const { priority: _p, ...result } = presetVerified;
+			return { ...result, verified: true };
+		}
 	}
 
 	const candidates = await collectImapCandidates(trimmed, domain);
@@ -471,7 +530,8 @@ export async function discoverImapSettings(
 
 	const verified = await pickVerifiedCandidate(candidates, {
 		email: trimmed,
-		password: options?.password,
+		password,
+		bannerTimeoutMs: DISCOVERY_BANNER_PROBE_MS,
 		toCredentials: (c) => ({
 			provider: c.provider,
 			email: trimmed,
@@ -479,7 +539,7 @@ export async function discoverImapSettings(
 			port: c.port,
 			secure: c.secure,
 			authMethod: "password",
-			password: options?.password,
+			password,
 		}),
 	});
 
@@ -489,7 +549,7 @@ export async function discoverImapSettings(
 	}
 
 	throw new Error(
-		options?.password?.trim()
+		password
 			? `No working IMAP server found for ${domain}. Check your password or enter the server manually under “Show server settings”.`
 			: `Could not verify an IMAP server for ${domain}. Enter your password and try again, or set the server manually.`,
 	);

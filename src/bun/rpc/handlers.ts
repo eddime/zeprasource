@@ -18,6 +18,11 @@ import {
 import { discoverImapSettings as lookupImapSettings } from "../services/imap/imap-autodiscover";
 import { checkDestinationQuota } from "../services/imap/destination-quota";
 import {
+	checkBackupDiskSpace,
+	defaultBackupParentDir,
+	pickBackupDirectoryNative,
+} from "../services/backup/backup-disk";
+import {
 	estimateMigrationSize as computeMigrationSize,
 	measureFolderSizes,
 	testImapConnection,
@@ -38,9 +43,16 @@ import {
 	getResumableMigrations,
 	MigrationCapacityError,
 	pauseMigration,
+	resumeMigration,
 	type ProgressEmitter,
 } from "../services/migration/migration-engine";
 import { runMigrationPreflight } from "../services/migration/migration-preflight";
+import { loadMigrationResumePayload } from "../services/migration/migration-resume";
+import { assertMigrationResumeLicense } from "../services/stripe/migration-payment-entitlements";
+import {
+	cancelledProgressExtras,
+	userPauseProgressExtras,
+} from "../../shared/migration-progress";
 import type { MigrationProgress } from "../../shared/types";
 import {
 	createMigrationCheckout,
@@ -107,6 +119,21 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 				});
 			},
 
+			getDefaultBackupParentDir: () => ({
+				defaultPath: defaultBackupParentDir(),
+			}),
+
+			pickBackupDirectory: () => {
+				const picked = pickBackupDirectoryNative();
+				return {
+					path: picked,
+					defaultPath: defaultBackupParentDir(),
+				};
+			},
+
+			checkBackupDiskSpace: async ({ parentDir, requiredBytes }) =>
+				checkBackupDiskSpace(parentDir, requiredBytes),
+
 			startMigration: async (params) => {
 				if (!progressEmitter) {
 					throw new Error("Progress bridge not initialized");
@@ -148,6 +175,16 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 
 			cancelMigration: ({ migrationId }) => {
 				cancelMigration(migrationId);
+				const emit = getProgressEmitter();
+				if (emit) {
+					const snapshot = getMigrationProgressSnapshot(
+						migrationId,
+						"cancelled",
+						cancelledProgressExtras(),
+						{ reconcile: true },
+					);
+					if (snapshot) emit(snapshot);
+				}
 				return { success: true };
 			},
 
@@ -158,11 +195,29 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 					const snapshot = getMigrationProgressSnapshot(
 						migrationId,
 						"paused",
-						undefined,
+						userPauseProgressExtras(),
 						{ reconcile: true },
 					);
 					if (snapshot) emit(snapshot);
 				}
+				return { success: true };
+			},
+
+			resumeMigration: async ({ migrationId }) => {
+				if (!progressEmitter) {
+					throw new Error("Progress bridge not initialized");
+				}
+				const payload = loadMigrationResumePayload(migrationId);
+				if (!payload) {
+					throw new Error(
+						"Migration cannot be resumed — reconnect your mailboxes and try again.",
+					);
+				}
+				const folderPaths = payload.folderMappings
+					.filter((m) => m.selected)
+					.map((m) => m.sourcePath);
+				await assertMigrationResumeLicense(migrationId, folderPaths);
+				await resumeMigration(migrationId, progressEmitter);
 				return { success: true };
 			},
 

@@ -13,13 +13,19 @@ export interface SessionCardModel {
 
 const ACTIVE_STATUSES: MigrationStatus[] = ["running", "paused", "failed"];
 
+/** Messages that are done transferring (moved or gave up on this run). */
+export function messagesAccountedFor(progress: MigrationProgress | undefined): number {
+	if (!progress) return 0;
+	return progress.messagesCompleted + (progress.messagesFailed ?? 0);
+}
+
 export function migrationPercent(progress: MigrationProgress | undefined): number {
 	if (!progress) return 0;
 	if (progress.messagesTotal > 0) {
-		return Math.min(
-			100,
-			Math.round((progress.messagesCompleted / progress.messagesTotal) * 100),
-		);
+		const accounted = messagesAccountedFor(progress);
+		const total = progress.messagesTotal;
+		if (accounted >= total) return 100;
+		return Math.min(100, Math.round((accounted / total) * 100));
 	}
 	if (progress.foldersTotal > 0) {
 		return Math.min(

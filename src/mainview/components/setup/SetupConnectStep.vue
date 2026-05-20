@@ -36,7 +36,9 @@ const stepsComplete = computed(
 	() => props.sourceValidated && props.destValidated,
 );
 
-const ctaLabel = computed(() => (stepsComplete.value ? "Choose folders" : "Almost there"));
+const ctaLabel = computed(() =>
+	stepsComplete.value ? "Choose folders" : "Waiting for connection",
+);
 </script>
 
 <template>

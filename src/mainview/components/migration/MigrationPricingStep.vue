@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted } from "vue";
 import type { MigrationSizeEstimate } from "../../../shared/types";
+import { formatMigrationDurationHint } from "../../../shared/migration-duration";
 import {
 	FREE_MIGRATION_LIMIT_BYTES,
 	PRICING_TIER_LIMITS_GB,
@@ -120,10 +121,7 @@ const canPay = computed(() => props.stripeConfigured !== false && !props.loading
 
 				<div class="time-row">
 					<span class="time-label">Est. time</span>
-					<span class="time-value">
-						{{ estimate.durationLabel }}
-						<span class="time-range">({{ estimate.durationRangeLabel }})</span>
-					</span>
+					<span class="time-value">{{ formatMigrationDurationHint(estimate) }}</span>
 				</div>
 
 				<p v-if="loading" class="pay-wait" role="status">

@@ -51,6 +51,8 @@ export interface MigrationProgress {
 		| "reconnecting";
 	activityLabel?: string;
 	retryAfterMs?: number;
+	/** ISO timestamp when the current retry backoff ends (for live UI countdown). */
+	retryEndsAt?: string;
 	foldersTotal: number;
 	foldersCompleted: number;
 	messagesTotal: number;
@@ -59,6 +61,8 @@ export interface MigrationProgress {
 	bytesTransferred: number;
 	currentMessage?: string;
 	error?: string;
+	/** True when the user tapped Pause (not engine failure-pause). */
+	userInitiatedPause?: boolean;
 	startedAt?: string;
 	updatedAt: string;
 }
@@ -83,7 +87,17 @@ export interface MigrationRecord {
 export interface AppSettings {
 	theme: "system" | "light" | "dark";
 	telemetryEnabled: boolean;
+	/** Last parent directory chosen for optional local .eml backup. */
+	lastBackupParentDir?: string;
 }
+
+export type BackupDiskCheck = {
+	ok: boolean;
+	path: string;
+	freeBytes: number;
+	requiredBytes: number;
+	summary: string;
+};
 
 export interface FolderMapping {
 	sourcePath: string;

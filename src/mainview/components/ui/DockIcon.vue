@@ -25,7 +25,7 @@ defineProps<{
 			/>
 		</svg>
 
-		<!-- Almost there: link -->
+		<!-- Waiting for connection: link -->
 		<svg v-else-if="kind === 'pending'" class="dock-icon" viewBox="0 0 24 24" fill="none">
 			<path
 				class="dock-icon-link-a"

@@ -1,5 +1,12 @@
 import { defineStore } from "pinia";
-import { computed, ref, shallowRef } from "vue";
+import { computed, ref, shallowRef, watch } from "vue";
+import {
+	deriveMigrationUiState,
+	isLiveUiPhase,
+	isTerminalMigrationStatus,
+	mergeMigrationProgress,
+	type MigrationUiContext,
+} from "../../shared/migration-ui-state";
 import {
 	migrationPercent,
 	recordToProgress,
@@ -9,21 +16,43 @@ import type { MigrationProgress, MigrationRecord } from "../../shared/types";
 import { getRpc, electroview } from "../lib/electrobun";
 import { useMailboxesStore } from "./mailboxes";
 
+const UI_CLOCK_MS = 1000;
+const PROGRESS_POLL_MS = 3000;
+
 export const useMigrationStore = defineStore("migration", () => {
 	const focusedId = ref<string | null>(null);
 	const progressById = shallowRef(new Map<string, MigrationProgress>());
 	const history = ref<MigrationRecord[]>([]);
 	const resumableIds = ref<string[]>([]);
-	const running = ref(false);
-	const resuming = ref(false);
+	const engineActiveIds = ref<string[]>([]);
+	const pendingAction = ref<MigrationUiContext["pendingAction"]>(null);
+	const resumeError = ref<string | null>(null);
+	const plannedDurationHint = ref<string | null>(null);
+	const uiClock = ref(Date.now());
+
+	let uiClockTimer: ReturnType<typeof setInterval> | null = null;
+	let progressPollTimer: ReturnType<typeof setInterval> | null = null;
 
 	const focusedProgress = computed(() => {
 		const id = focusedId.value;
-		if (!id) return null;
-		return progressById.value.get(id) ?? null;
+		return id ? (progressById.value.get(id) ?? null) : null;
 	});
 
 	const progress = focusedProgress;
+
+	const uiContext = computed(
+		(): MigrationUiContext => ({
+			pendingAction: pendingAction.value,
+			engineInMemory: focusedId.value
+				? engineActiveIds.value.includes(focusedId.value)
+				: false,
+			plannedDurationHint: plannedDurationHint.value,
+			resumeError: resumeError.value,
+			nowMs: uiClock.value,
+		}),
+	);
+
+	const ui = computed(() => deriveMigrationUiState(focusedProgress.value, uiContext.value));
 
 	const sessionLists = computed(() =>
 		splitSessionLists(history.value, progressById.value),
@@ -35,66 +64,60 @@ export const useMigrationStore = defineStore("migration", () => {
 		() => activeSessions.value.length + pastSessions.value.length > 0,
 	);
 	const sessionsHydrated = ref(false);
+	const isLiveMigration = computed(() => ui.value.showHero);
+	const overallPercent = computed(() => migrationPercent(focusedProgress.value ?? undefined));
 
-	const isLiveMigration = computed(() => {
-		const status = focusedProgress.value?.status;
-		return (
-			running.value ||
-			resuming.value ||
-			status === "running" ||
-			status === "paused" ||
-			status === "failed" ||
-			status === "completed"
-		);
-	});
-
-	const overallPercent = computed(() =>
-		migrationPercent(focusedProgress.value ?? undefined),
-	);
-
-	function setProgress(snapshot: MigrationProgress) {
-		const next = new Map(progressById.value);
-		next.set(snapshot.migrationId, snapshot);
-		progressById.value = next;
+	function stopLiveTimers() {
+		if (uiClockTimer) clearInterval(uiClockTimer);
+		if (progressPollTimer) clearInterval(progressPollTimer);
+		uiClockTimer = null;
+		progressPollTimer = null;
 	}
 
-	function syncFocusedFlags() {
+	function applyProgress(incoming: MigrationProgress) {
+		const prev = progressById.value.get(incoming.migrationId);
+		const merged = mergeMigrationProgress(prev, incoming);
+		const next = new Map(progressById.value);
+		next.set(merged.migrationId, merged);
+		progressById.value = next;
+
+		if (incoming.migrationId !== focusedId.value) return;
+		if (
+			incoming.status === "running" ||
+			incoming.status === "paused" ||
+			isTerminalMigrationStatus(incoming.status)
+		) {
+			pendingAction.value = null;
+		}
+	}
+
+	async function refreshEngineActive() {
+		try {
+			engineActiveIds.value = await getRpc().request.getActiveMigrationIds({});
+		} catch {
+			engineActiveIds.value = [];
+		}
+	}
+
+	async function syncFocusedSnapshot() {
 		const id = focusedId.value;
-		if (!id) {
-			running.value = false;
-			resuming.value = false;
-			return;
-		}
-		const p = progressById.value.get(id);
-		if (!p) {
-			running.value = false;
-			resuming.value = false;
-			return;
-		}
-		running.value = p.status === "running";
-		resuming.value = p.status === "paused" || p.status === "failed";
+		if (!id) return;
+		await refreshEngineActive();
+		// While the engine is in memory it owns live activity/retry state; DB polls
+		// only carry counters and would wipe countdowns or fight pause/resume.
+		if (engineActiveIds.value.includes(id)) return;
+
+		const snapshot = await getRpc().request.getMigrationProgress({ migrationId: id });
+		if (snapshot) applyProgress(snapshot);
 	}
 
 	function listenForProgress() {
 		electroview.rpc?.addMessageListener("migrationProgress", (payload) => {
-			setProgress(payload);
-
+			applyProgress(payload);
 			if (payload.migrationId === focusedId.value) {
-				if (payload.status === "running") {
-					running.value = true;
-					resuming.value = false;
-				}
-				if (payload.status === "paused") {
-					running.value = false;
-					resuming.value = false;
-				}
-				if (payload.status === "completed" || payload.status === "failed") {
-					running.value = false;
-					resuming.value = false;
-				}
+				void refreshEngineActive();
 			}
-
-			if (payload.status === "completed" || payload.status === "failed") {
+			if (isTerminalMigrationStatus(payload.status)) {
 				void refreshHistory();
 			}
 		});
@@ -115,13 +138,14 @@ export const useMigrationStore = defineStore("migration", () => {
 		for (const id of ids) {
 			if (progressById.value.has(id)) continue;
 			const snapshot = await rpc.request.getMigrationProgress({ migrationId: id });
-			if (snapshot) setProgress(snapshot);
+			if (snapshot) applyProgress(snapshot);
 		}
 	}
 
 	async function hydrateSessions() {
 		try {
 			await refreshHistory();
+			await refreshEngineActive();
 			await hydrateActiveProgress();
 		} finally {
 			sessionsHydrated.value = true;
@@ -129,8 +153,9 @@ export const useMigrationStore = defineStore("migration", () => {
 	}
 
 	async function focusSession(migrationId: string) {
-		const rpc = getRpc();
 		focusedId.value = migrationId;
+		pendingAction.value = null;
+		resumeError.value = null;
 
 		const record = history.value.find((r) => r.id === migrationId);
 		let snapshot = progressById.value.get(migrationId) ?? null;
@@ -138,35 +163,20 @@ export const useMigrationStore = defineStore("migration", () => {
 			Boolean(record && snapshot && snapshot.status !== record.status);
 
 		if (!snapshot || stale) {
-			snapshot = await rpc.request.getMigrationProgress({ migrationId });
+			snapshot = await getRpc().request.getMigrationProgress({ migrationId });
 		}
 		if (!snapshot && record) {
 			snapshot = recordToProgress(record);
 		}
-		if (snapshot) setProgress(snapshot);
+		if (snapshot) applyProgress(snapshot);
 
-		const activeEngineIds = await rpc.request.getActiveMigrationIds({});
-		if (snapshot?.status === "running" && activeEngineIds.includes(migrationId)) {
-			running.value = true;
-			resuming.value = false;
-		} else if (snapshot?.status === "paused" || snapshot?.status === "failed") {
-			running.value = false;
-			resuming.value = true;
-		} else if (
-			snapshot?.status === "completed" ||
-			snapshot?.status === "cancelled"
-		) {
-			running.value = false;
-			resuming.value = false;
-		} else {
-			syncFocusedFlags();
-		}
+		await refreshEngineActive();
 	}
 
 	function resetFocused() {
 		focusedId.value = null;
-		running.value = false;
-		resuming.value = false;
+		pendingAction.value = null;
+		resumeError.value = null;
 	}
 
 	async function restoreSession(): Promise<boolean> {
@@ -182,6 +192,7 @@ export const useMigrationStore = defineStore("migration", () => {
 		options?: {
 			plannedSecondsTypical?: number;
 			launchTicket?: string;
+			backupRootPath?: string | null;
 		},
 	) {
 		const rpc = getRpc();
@@ -193,8 +204,9 @@ export const useMigrationStore = defineStore("migration", () => {
 				? (focusedId.value ?? undefined)
 				: undefined);
 
-		running.value = true;
-		resuming.value = Boolean(resumeId);
+		pendingAction.value = resumeId ? "resume" : "start";
+		resumeError.value = null;
+
 		try {
 			const mailboxes = useMailboxesStore();
 			const { migrationId } = resumeId
@@ -205,34 +217,71 @@ export const useMigrationStore = defineStore("migration", () => {
 						folderMappings: mailboxes.folderMappings.filter((f) => f.selected),
 						plannedSecondsTypical: options?.plannedSecondsTypical,
 						launchTicket: options?.launchTicket,
+						backupRootPath: options?.backupRootPath ?? null,
 					});
 
 			focusedId.value = migrationId;
-			const snapshot = await rpc.request.getMigrationProgress({ migrationId });
-			if (snapshot) setProgress(snapshot);
+			await refreshEngineActive();
+			await syncFocusedSnapshot();
 		} catch (error) {
-			running.value = false;
-			resuming.value = false;
+			pendingAction.value = null;
 			throw error;
-		} finally {
-			resuming.value = false;
 		}
 	}
 
 	async function cancel() {
 		if (!focusedId.value) return;
-		const rpc = getRpc();
-		await rpc.request.cancelMigration({ migrationId: focusedId.value });
-		running.value = false;
-		resuming.value = false;
+		const migrationId = focusedId.value;
+		await getRpc().request.cancelMigration({ migrationId });
+		pendingAction.value = null;
+		// Apply cancelled immediately — syncFocusedSnapshot skips while the engine is in memory.
+		const snapshot = await getRpc().request.getMigrationProgress({ migrationId });
+		if (snapshot) applyProgress(snapshot);
+		await refreshEngineActive();
+		await refreshHistory();
 	}
 
 	async function pause() {
 		if (!focusedId.value) return;
-		const rpc = getRpc();
-		await rpc.request.pauseMigration({ migrationId: focusedId.value });
-		running.value = false;
+		await getRpc().request.pauseMigration({ migrationId: focusedId.value });
+		pendingAction.value = null;
+		await refreshEngineActive();
+		await syncFocusedSnapshot();
 	}
+
+	async function resume() {
+		if (!focusedId.value) return;
+		pendingAction.value = "resume";
+		resumeError.value = null;
+
+		try {
+			await getRpc().request.resumeMigration({ migrationId: focusedId.value });
+			await refreshEngineActive();
+			await syncFocusedSnapshot();
+		} catch (error) {
+			pendingAction.value = null;
+			resumeError.value =
+				error instanceof Error ? error.message : "Could not resume migration";
+			throw error;
+		}
+	}
+
+	watch(
+		() => [focusedId.value, ui.value.phase] as const,
+		([id, phase]) => {
+			stopLiveTimers();
+			if (!id || !isLiveUiPhase(phase)) return;
+
+			uiClockTimer = setInterval(() => {
+				uiClock.value = Date.now();
+			}, UI_CLOCK_MS);
+
+			progressPollTimer = setInterval(() => {
+				void syncFocusedSnapshot();
+			}, PROGRESS_POLL_MS);
+		},
+		{ immediate: true },
+	);
 
 	return {
 		focusedId,
@@ -245,8 +294,8 @@ export const useMigrationStore = defineStore("migration", () => {
 		pastSessions,
 		hasSessionCards,
 		sessionsHydrated,
-		running,
-		resuming,
+		plannedDurationHint,
+		ui,
 		isLiveMigration,
 		overallPercent,
 		listenForProgress,
@@ -258,5 +307,6 @@ export const useMigrationStore = defineStore("migration", () => {
 		start,
 		cancel,
 		pause,
+		resume,
 	};
 });

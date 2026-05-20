@@ -9,7 +9,9 @@ import { describeFinishingRemainingActivity } from "./migration-autopilot";
 import type { createImapClient } from "../imap/imap-client";
 
 export const MAX_FAILURE_SWEEPS = 15;
-export const SWEEP_BASE_DELAY_MS = 2000;
+import { FAILURE_SWEEP_BASE_DELAY_MS } from "./migration-constants";
+
+export const SWEEP_BASE_DELAY_MS = FAILURE_SWEEP_BASE_DELAY_MS;
 
 type MarkMessageFn = Parameters<typeof transferFolderWithLanes>[0]["markMessage"];
 
@@ -54,6 +56,7 @@ export async function sweepFailedMessages(options: {
 	destination: MailboxCredentials;
 	destClient: Awaited<ReturnType<typeof createImapClient>>;
 	transfer: MigrationTransferConfig;
+	backupRootPath: string | null;
 	markMessage: MarkMessageFn;
 	hooksForMapping: (mapping: FolderMapping) => FolderTransferHooks;
 }): Promise<number> {
@@ -72,6 +75,7 @@ export async function sweepFailedMessages(options: {
 			destClient: options.destClient,
 			pendingUids: failedUids,
 			transfer: options.transfer,
+			backupRootPath: options.backupRootPath,
 			markMessage: options.markMessage,
 			hooks,
 		});

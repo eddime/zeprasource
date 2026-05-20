@@ -14,12 +14,18 @@ import {
 	safeCloseImapClient,
 	type FetchedMigrationMessage,
 } from "../imap/imap-client";
-import { MIGRATION_FETCH_BATCH_SIZE } from "./migration-constants";
+import {
+	INTER_BATCH_PAUSE_MS,
+	MESSAGE_TRANSFER_TIMEOUT_MS,
+	MIGRATION_FETCH_BATCH_SIZE,
+	MIGRATION_RETRY_DELAY_DEFAULTS,
+} from "./migration-constants";
 import {
 	classifyMigrationError,
 	type MigrationErrorClassification,
 } from "./migration-errors";
 import { computeRetryDelay } from "./retry-policy";
+import { writeBackupMessage } from "../backup/backup-writer";
 
 export function shardUids(uids: number[], laneCount: number): number[][] {
 	if (uids.length === 0) return [];
@@ -55,6 +61,8 @@ export type FolderTransferHooks = {
 		classification: MigrationErrorClassification,
 		retryAfterMs: number,
 	) => void;
+	/** Called when a retry backoff sleep finishes and a new attempt is about to start. */
+	afterRetryWait?: () => void;
 	onBatchFinished?: () => void;
 };
 
@@ -70,6 +78,27 @@ type MarkMessageFn = (
 	retryCount?: number,
 ) => void;
 
+async function withTimeout<T>(
+	promise: Promise<T>,
+	ms: number,
+	label: string,
+): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<T>((_, reject) => {
+				timer = setTimeout(
+					() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
+					ms,
+				);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
+}
+
 async function transferMessage(
 	db: Database,
 	migrationId: string,
@@ -79,6 +108,7 @@ async function transferMessage(
 	destClient: Awaited<ReturnType<typeof createImapClient>>,
 	destMessageIds: Set<string>,
 	duplicateLock: ReturnType<typeof createAsyncMutex>,
+	backupAccountDir: string | null,
 	markMessage: MarkMessageFn,
 	hooks: FolderTransferHooks,
 ): Promise<void> {
@@ -102,10 +132,14 @@ async function transferMessage(
 
 	const flagList = transfer.preserveFlags ? flagsToArray(flags) : undefined;
 	try {
-		await appendMessage(destClient, mapping.destPath, source, {
-			flags: flagList,
-			internalDate,
-		});
+		await withTimeout(
+			appendMessage(destClient, mapping.destPath, source, {
+				flags: flagList,
+				internalDate,
+			}),
+			MESSAGE_TRANSFER_TIMEOUT_MS,
+			`Append to ${mapping.destPath}`,
+		);
 	} catch (error) {
 		if (reservedMessageIdKey) {
 			await duplicateLock.run(async () => {
@@ -113,6 +147,22 @@ async function transferMessage(
 			});
 		}
 		throw error;
+	}
+
+	if (backupAccountDir) {
+		const backupResult = await writeBackupMessage({
+			accountDir: backupAccountDir,
+			folderPath: mapping.sourcePath,
+			uid,
+			source,
+		});
+		if (backupResult.status === "failed") {
+			logger.warn(
+				"backup",
+				`Backup write failed for ${mapping.sourcePath} uid ${uid}`,
+				backupResult.error,
+			);
+		}
 	}
 
 	const size = source.byteLength;
@@ -130,6 +180,7 @@ async function runMigrationLane(options: {
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
+	backupAccountDir: string | null;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
@@ -143,6 +194,7 @@ async function runMigrationLane(options: {
 		transfer,
 		destMessageIds,
 		duplicateLock,
+		backupAccountDir,
 		markMessage,
 		hooks,
 	} = options;
@@ -187,6 +239,7 @@ async function runMigrationLane(options: {
 						transfer,
 						destMessageIds,
 						duplicateLock,
+						backupAccountDir,
 						markMessage,
 						hooks,
 					});
@@ -212,6 +265,7 @@ async function runMigrationLane(options: {
 						transfer,
 						destMessageIds,
 						duplicateLock,
+						backupAccountDir,
 						markMessage,
 						hooks,
 					});
@@ -227,15 +281,31 @@ async function runMigrationLane(options: {
 					transfer,
 					destMessageIds,
 					duplicateLock,
+					backupAccountDir,
 					markMessage,
 					hooks,
 				});
 			}
 			hooks.onBatchFinished?.();
+			if (INTER_BATCH_PAUSE_MS > 0) {
+				await Bun.sleep(INTER_BATCH_PAUSE_MS);
+			}
 		}
 	} finally {
 		await safeCloseImapClient(sourceClient);
 		await safeCloseImapClient(destClient);
+	}
+}
+
+async function sleepRespectingHooks(ms: number, hooks: FolderTransferHooks): Promise<void> {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		if (hooks.shouldStop()) return;
+		await hooks.waitWhilePaused();
+		if (hooks.shouldStop()) return;
+		const remaining = deadline - Date.now();
+		if (remaining <= 0) break;
+		await Bun.sleep(Math.min(250, remaining));
 	}
 }
 
@@ -248,12 +318,17 @@ async function processFetchedWithRetries(options: {
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
+	backupAccountDir: string | null;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
 	const { msg, transfer, hooks, markMessage, db, migrationId, mapping } = options;
 	let attempt = 0;
 	while (attempt < transfer.maxRetryAttempts) {
+		if (hooks.shouldStop()) return;
+		await hooks.waitWhilePaused();
+		if (hooks.shouldStop()) return;
+
 		try {
 			await transferMessage(
 				db,
@@ -264,6 +339,7 @@ async function processFetchedWithRetries(options: {
 				options.destClient,
 				options.destMessageIds,
 				options.duplicateLock,
+				options.backupAccountDir,
 				markMessage,
 				hooks,
 			);
@@ -287,12 +363,31 @@ async function processFetchedWithRetries(options: {
 				);
 				logger.error("migration", `Failed UID ${msg.uid} in ${mapping.sourcePath}`, errMsg);
 			} else {
-				const retryAfterMs = computeRetryDelay(attempt);
+				const retryAfterMs = computeRetryDelay(attempt, MIGRATION_RETRY_DELAY_DEFAULTS);
 				hooks.onRetry?.(msg.uid, classification, retryAfterMs);
-				await Bun.sleep(retryAfterMs);
+				await sleepRespectingHooks(retryAfterMs, hooks);
+				if (hooks.shouldStop()) return;
+				hooks.afterRetryWait?.();
 			}
 		}
 	}
+
+	hooks.onMessageFailed(msg.uid);
+	markMessage(
+		db,
+		migrationId,
+		mapping.sourcePath,
+		msg.uid,
+		"failed",
+		0,
+		msg.messageId,
+		"Could not move this message after several tries",
+		transfer.maxRetryAttempts,
+	);
+	logger.error(
+		"migration",
+		`Gave up UID ${msg.uid} in ${mapping.sourcePath} after ${transfer.maxRetryAttempts} attempts`,
+	);
 }
 
 async function processUidWithRetries(options: {
@@ -305,11 +400,16 @@ async function processUidWithRetries(options: {
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
+	backupAccountDir: string | null;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
 	let msg: FetchedMigrationMessage | undefined;
 	for (let fetchAttempt = 0; fetchAttempt < 12; fetchAttempt++) {
+		if (options.hooks.shouldStop()) return;
+		await options.hooks.waitWhilePaused();
+		if (options.hooks.shouldStop()) return;
+
 		const batch = await fetchMessagesBatch(
 			options.sourceClient,
 			options.mapping.sourcePath,
@@ -317,7 +417,8 @@ async function processUidWithRetries(options: {
 		);
 		msg = batch[0];
 		if (msg) break;
-		await Bun.sleep(400 + fetchAttempt * 200);
+		await sleepRespectingHooks(400 + fetchAttempt * 200, options.hooks);
+		if (options.hooks.shouldStop()) return;
 	}
 	if (!msg) {
 		options.hooks.onMessageFailed(options.uid);
@@ -342,6 +443,7 @@ async function processUidWithRetries(options: {
 		transfer: options.transfer,
 		destMessageIds: options.destMessageIds,
 		duplicateLock: options.duplicateLock,
+		backupAccountDir: options.backupAccountDir,
 		markMessage: options.markMessage,
 		hooks: options.hooks,
 	});
@@ -356,6 +458,7 @@ export async function transferFolderWithLanes(options: {
 	destClient: Awaited<ReturnType<typeof createImapClient>>;
 	pendingUids: number[];
 	transfer: MigrationTransferConfig;
+	backupRootPath: string | null;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
@@ -368,6 +471,7 @@ export async function transferFolderWithLanes(options: {
 		destClient,
 		pendingUids,
 		transfer,
+		backupRootPath: backupAccountDir,
 		markMessage,
 		hooks,
 	} = options;
@@ -392,6 +496,7 @@ export async function transferFolderWithLanes(options: {
 				transfer,
 				destMessageIds,
 				duplicateLock,
+				backupAccountDir,
 				markMessage,
 				hooks,
 			}),

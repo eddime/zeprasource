@@ -99,7 +99,7 @@ describe("migration-repository", () => {
 		expect(progress?.messagesTotal).toBe(100);
 	});
 
-	test("updateFolderScannedTotal never lowers the folder-view estimate", () => {
+	test("updateFolderScannedTotal uses IMAP scan count for honest progress", () => {
 		const db = getDatabase();
 		const migrationId = "test-migration-3";
 
@@ -116,7 +116,7 @@ describe("migration-repository", () => {
 		).run(migrationId);
 
 		const afterScan = updateFolderScannedTotal(migrationId, "INBOX", 50);
-		expect(afterScan).toBe(200);
+		expect(afterScan).toBe(50);
 	});
 
 	test("markMigrationMessage upserts transfer status for a source uid", () => {

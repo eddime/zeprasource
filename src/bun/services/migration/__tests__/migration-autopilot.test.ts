@@ -10,16 +10,19 @@ import {
 import type { MigrationErrorClassification } from "../migration-errors";
 
 describe("migration-autopilot", () => {
-	test("starts conservative and can grow with stability", () => {
+	test("starts with two lanes and grows after stable batches", () => {
 		const state = createAutopilotState();
+		expect(getTransferConfig(state).parallelConnections).toBe(2);
+		for (let i = 0; i < 5; i++) recordAutopilotBatchSuccess(state);
+		expect(getTransferConfig(state).parallelConnections).toBe(2);
+		recordAutopilotBatchSuccess(state);
 		expect(getTransferConfig(state).parallelConnections).toBe(3);
-		for (let i = 0; i < 4; i++) recordAutopilotBatchSuccess(state);
-		expect(getTransferConfig(state).parallelConnections).toBe(4);
 	});
 
-	test("slows down after provider pressure", () => {
+	test("backs off one lane after provider pressure", () => {
 		const state = createAutopilotState();
-		for (let i = 0; i < 4; i++) recordAutopilotBatchSuccess(state);
+		for (let i = 0; i < 6; i++) recordAutopilotBatchSuccess(state);
+		expect(getTransferConfig(state).parallelConnections).toBe(3);
 		const throttled: MigrationErrorClassification = {
 			kind: "throttled",
 			retryable: true,
@@ -27,7 +30,7 @@ describe("migration-autopilot", () => {
 			userMessage: "",
 		};
 		recordAutopilotRetry(state, throttled);
-		expect(getTransferConfig(state).parallelConnections).toBe(3);
+		expect(getTransferConfig(state).parallelConnections).toBe(2);
 	});
 
 	test("completion summary only when needed", () => {
@@ -37,15 +40,12 @@ describe("migration-autopilot", () => {
 	});
 
 	test("retry activity is user-facing not technical", () => {
-		const text = describeRetryActivity(
-			{
-				kind: "throttled",
-				retryable: true,
-				reconnect: false,
-				userMessage: "",
-			},
-			5000,
-		);
+		const text = describeRetryActivity({
+			kind: "throttled",
+			retryable: true,
+			reconnect: false,
+			userMessage: "",
+		});
 		expect(text).toContain("slow down");
 		expect(text).not.toContain("throttl");
 	});

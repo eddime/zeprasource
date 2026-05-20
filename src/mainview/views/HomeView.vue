@@ -5,12 +5,15 @@ import onmoveBg from "@/assets/onmove-bg.png";
 import WelcomeStep from "../components/onboarding/WelcomeStep.vue";
 import ZebraMascot from "../components/zebra/ZebraMascot.vue";
 import ZebraProgressBar from "../components/zebra/ZebraProgressBar.vue";
-import type { ZebraState } from "../components/zebra/ZebraMascot.vue";
 import SetupConnectStep from "../components/setup/SetupConnectStep.vue";
 import SetupFoldersStep from "../components/setup/SetupFoldersStep.vue";
 import MigrationPricingStep from "../components/migration/MigrationPricingStep.vue";
+import MigrationMailParticles from "../components/migration/MigrationMailParticles.vue";
 import AppButton from "../components/ui/AppButton.vue";
 import type { MigrationSizeEstimate } from "../../shared/types";
+import { resolveBackupAccountDir } from "../../shared/backup-path";
+import { MIGRATION_COPY } from "../../shared/migration-copy";
+import { formatMigrationDurationHint } from "../../shared/migration-duration";
 import { isDestinationQuotaBlocked } from "../../shared/destination-quota";
 import type { PaidMigrationTierId } from "../../shared/stripe-checkout";
 import { getRpc } from "../lib/electrobun";
@@ -28,7 +31,10 @@ const pricingPaymentError = ref<string | null>(null);
 const stripeConfigured = ref(false);
 const estimateError = ref<string | null>(null);
 const quotaWarning = ref<string | null>(null);
-const plannedDurationHint = ref<string | null>(null);
+const localBackupEnabled = ref(false);
+const backupParentDir = ref("");
+const backupDiskError = ref<string | null>(null);
+const pickingBackupDir = ref(false);
 
 const mailboxes = useMailboxesStore();
 const migration = useMigrationStore();
@@ -48,24 +54,12 @@ const {
 	folderStatsError,
 } = storeToRefs(mailboxes);
 
-const { progress, overallPercent, running, resuming, isLiveMigration } =
+const { progress, overallPercent, ui, isLiveMigration, plannedDurationHint } =
 	storeToRefs(migration);
 
 const bothConnected = computed(
 	() => sourceValidated.value && destValidated.value,
 );
-
-const showMigrationHero = computed(() => {
-	const status = progress.value?.status;
-	return (
-		running.value ||
-		status === "running" ||
-		status === "paused" ||
-		status === "failed" ||
-		status === "completed" ||
-		status === "cancelled"
-	);
-});
 
 const usesDock = computed(
 	() =>
@@ -76,100 +70,7 @@ const usesDock = computed(
 );
 
 const isMigrationPaused = computed(
-	() => progress.value?.status === "paused" && !running.value,
-);
-
-const zebraState = computed((): ZebraState => {
-	const status = progress.value?.status;
-	if (status === "paused" && !running.value) return "paused";
-	if (running.value || status === "running") return "running";
-	if (status === "completed") return "success";
-	if (status === "cancelled") return "idle";
-	if (status === "failed") return "failed";
-	return "idle";
-});
-
-const headline = computed(() => {
-	const status = progress.value?.status;
-	if (running.value || status === "running") return "Your zebra is on the move…";
-	if (status === "paused") {
-		if ((progress.value?.messagesFailed ?? 0) > 0) return "Still finishing up…";
-		return "Migration paused";
-	}
-	if (status === "completed") return "Wow! Migration complete.";
-	if (status === "cancelled") return "Migration cancelled";
-	if (status === "failed") return "Oops — something went wrong.";
-	return "Connect both mailboxes";
-});
-
-const progressLabel = computed(() => {
-	const p = progress.value;
-	if (!p) return "";
-	if (
-		p.activityPhase === "retrying" ||
-		p.activityPhase === "reconnecting" ||
-		p.activityPhase === "throttled"
-	) {
-		return p.retryAfterMs
-			? `Continuing in ${Math.ceil(p.retryAfterMs / 1000)}s`
-			: "Continuing automatically…";
-	}
-	if (p.remainingDurationLabel) {
-		return p.remainingDurationLabel;
-	}
-	if (p.messagesTotal > 0) {
-		return `${p.messagesCompleted} of ${p.messagesTotal} messages`;
-	}
-	if (p.foldersTotal > 0) {
-		return `${p.foldersCompleted} of ${p.foldersTotal} folders`;
-	}
-	return "Preparing…";
-});
-
-const subline = computed(() => {
-	const status = progress.value?.status;
-	if (progress.value?.activityLabel && (running.value || status === "running")) {
-		return progress.value.activityLabel;
-	}
-	if (resuming.value || isCatchingUp.value) {
-		return "Picking up where we left off…";
-	}
-	if (
-		running.value ||
-		status === "running" ||
-		status === "paused"
-	) {
-		if (!progress.value?.remainingDurationLabel && plannedDurationHint.value) {
-			return `Expected ${plannedDurationHint.value} on your Mac`;
-		}
-	}
-	if (running.value || status === "running" || status === "paused") {
-		return `${progress.value?.messagesCompleted ?? 0} messages moved so far`;
-	}
-	if (status === "completed" && progress.value) {
-		if (progress.value.activityLabel) return progress.value.activityLabel;
-		const failed = progress.value.messagesFailed;
-		if (failed > 0) {
-			return `${progress.value.messagesCompleted} moved · ${failed} could not be copied`;
-		}
-		return `${progress.value.messagesCompleted} messages · all moved on your Mac`;
-	}
-	if (status === "cancelled" && progress.value) {
-		return `${progress.value.messagesCompleted} messages moved before cancel`;
-	}
-	if (status === "failed") {
-		return progress.value?.error ?? "Tap restart to try again";
-	}
-	return "Link your old inbox and where mail should land — we’ll handle the rest.";
-});
-
-const isCatchingUp = computed(
-	() =>
-		resuming.value ||
-		(!running.value &&
-			(progress.value?.status === "running" ||
-				progress.value?.status === "paused" ||
-				progress.value?.status === "failed")),
+	() => ui.value.phase === "userPaused" || ui.value.phase === "enginePaused",
 );
 
 function clearFinishedMigration() {
@@ -190,7 +91,7 @@ async function openSession(id: string) {
 		return;
 	}
 
-	if (status === "paused" || status === "failed") {
+	if (status === "failed") {
 		const active = await getRpc().request.getActiveMigrationIds({});
 		if (!active.includes(id)) {
 			await migration.start(id);
@@ -221,7 +122,57 @@ function backFromSetup() {
 function backFromFolders() {
 	estimateError.value = null;
 	quotaWarning.value = null;
+	backupDiskError.value = null;
 	step.value = "setup";
+}
+
+async function refreshBackupDiskHint(requiredBytes: number) {
+	if (!localBackupEnabled.value || !backupParentDir.value.trim()) {
+		backupDiskError.value = null;
+		return;
+	}
+	const disk = await getRpc().request.checkBackupDiskSpace({
+		parentDir: backupParentDir.value,
+		requiredBytes,
+	});
+	backupDiskError.value = disk.ok ? null : disk.summary;
+}
+
+async function pickBackupDir() {
+	pickingBackupDir.value = true;
+	backupDiskError.value = null;
+	try {
+		const { path, defaultPath } = await getRpc().request.pickBackupDirectory({});
+		if (path) {
+			backupParentDir.value = path;
+			const settings = await getRpc().request.getSettings({});
+			await getRpc().request.saveSettings({
+				settings: { ...settings, lastBackupParentDir: path },
+			});
+		} else if (!backupParentDir.value) {
+			backupParentDir.value = defaultPath;
+		}
+		const bytes = folderMappings.value
+			.filter((f) => f.selected)
+			.reduce((sum, f) => sum + (f.bytes ?? 0), 0);
+		await refreshBackupDiskHint(bytes);
+	} finally {
+		pickingBackupDir.value = false;
+	}
+}
+
+async function resolveBackupRootForStart(
+	estimate: MigrationSizeEstimate,
+): Promise<string | null> {
+	if (!localBackupEnabled.value) return null;
+	if (!backupParentDir.value.trim()) {
+		throw new Error("Choose a folder for your local backup.");
+	}
+	await refreshBackupDiskHint(estimate.totalBytes);
+	if (backupDiskError.value) {
+		throw new Error(backupDiskError.value);
+	}
+	return resolveBackupAccountDir(backupParentDir.value, source.value.email);
 }
 
 async function verifyDestinationQuota(estimate: MigrationSizeEstimate) {
@@ -270,7 +221,7 @@ async function startMigration() {
 		});
 
 		await verifyDestinationQuota(estimate);
-		plannedDurationHint.value = `${estimate.durationLabel} (${estimate.durationRangeLabel})`;
+		plannedDurationHint.value = formatMigrationDurationHint(estimate);
 
 		if (estimate.requiresPayment) {
 			sizeEstimate.value = estimate;
@@ -278,8 +229,11 @@ async function startMigration() {
 			return;
 		}
 
+		const backupRootPath = await resolveBackupRootForStart(estimate);
+
 		await migration.start(undefined, {
 			plannedSecondsTypical: estimate.secondsTypical,
+			backupRootPath,
 		});
 		step.value = "setup";
 	} catch (error) {
@@ -355,7 +309,7 @@ async function confirmPricingAndMigrate() {
 	if (!sizeEstimate.value) return;
 	pricingContinueLoading.value = true;
 	pricingPaymentError.value = null;
-	plannedDurationHint.value = `${sizeEstimate.value.durationLabel} (${sizeEstimate.value.durationRangeLabel})`;
+	plannedDurationHint.value = formatMigrationDurationHint(sizeEstimate.value);
 	try {
 		const tier = pricing.tierForBytes(sizeEstimate.value.totalBytes);
 		if (tier.id === "free") {
@@ -395,9 +349,12 @@ async function confirmPricingAndMigrate() {
 			throw new Error(payment.error);
 		}
 
+		const backupRootPath = await resolveBackupRootForStart(sizeEstimate.value);
+
 		await migration.start(undefined, {
 			plannedSecondsTypical: sizeEstimate.value.secondsTypical,
 			launchTicket: payment.launchTicket,
+			backupRootPath,
 		});
 		step.value = "setup";
 		sizeEstimate.value = null;
@@ -415,8 +372,26 @@ function onDone() {
 	void migration.hydrateSessions();
 }
 
-onMounted(() => {
+onMounted(async () => {
 	void pricing.ensureLoaded();
+	const settings = await getRpc().request.getSettings({});
+	if (settings.lastBackupParentDir) {
+		backupParentDir.value = settings.lastBackupParentDir;
+	} else {
+		const { defaultPath } = await getRpc().request.getDefaultBackupParentDir({});
+		backupParentDir.value = defaultPath;
+	}
+});
+
+watch([localBackupEnabled, () => folderMappings.value], async () => {
+	if (!localBackupEnabled.value) {
+		backupDiskError.value = null;
+		return;
+	}
+	const bytes = folderMappings.value
+		.filter((f) => f.selected)
+		.reduce((sum, f) => sum + (f.bytes ?? 0), 0);
+	await refreshBackupDiskHint(bytes);
 });
 
 async function startAnotherMigration() {
@@ -445,6 +420,7 @@ async function startAnotherMigration() {
 				/>
 			</div>
 			<div class="onmove-vignette" />
+			<MigrationMailParticles v-if="ui.showParticles" :paused="isMigrationPaused" />
 		</div>
 		<main
 			class="content"
@@ -473,32 +449,48 @@ async function startAnotherMigration() {
 				/>
 
 				<div v-else key="s" class="setup step-view">
-					<div v-if="showMigrationHero" class="hero-stack">
-						<ZebraMascot :state="zebraState" :size="178" class="hero-zebra" />
+					<div v-if="isLiveMigration" class="hero-stack">
+						<ZebraMascot :state="ui.zebraState" :size="178" class="hero-zebra" />
 						<div class="hero-copy">
-							<p class="hero-title">{{ headline }}</p>
-							<p class="hero-sub">{{ subline }}</p>
+							<p class="hero-title">{{ ui.headline }}</p>
+							<p class="hero-sub">{{ ui.subline }}</p>
 							<ZebraProgressBar
-								v-if="running || progress?.status === 'running' || progress?.status === 'paused'"
+								v-if="ui.showProgressBar"
 								class="hero-progress"
 								:percent="overallPercent"
-								:label="progressLabel"
+								:label="ui.progressLabel"
 							/>
-							<div v-if="running" class="hero-actions row">
+							<div v-if="ui.canPause" class="hero-actions row">
 								<AppButton variant="secondary" @click="migration.pause()">
 									Pause
 								</AppButton>
 								<AppButton variant="ghost" @click="migration.cancel()">
-									Give up
+									{{ MIGRATION_COPY.buttons.cancelMigration }}
 								</AppButton>
 							</div>
-							<div v-else-if="isCatchingUp" class="hero-actions row">
-								<p class="hero-resume-hint">Migration wird fortgesetzt…</p>
+							<div v-else-if="ui.canResume" class="hero-actions row">
+								<AppButton size="lg" @click="migration.resume()">
+									Resume
+								</AppButton>
 								<AppButton variant="ghost" @click="migration.cancel()">
-									Give up
+									{{ MIGRATION_COPY.buttons.cancelMigration }}
 								</AppButton>
 							</div>
-							<div v-else-if="progress?.status === 'failed'" class="hero-actions">
+							<div v-else-if="ui.canContinue" class="hero-actions row">
+								<AppButton size="lg" @click="migration.resume()">
+									Continue
+								</AppButton>
+								<AppButton variant="ghost" @click="migration.cancel()">
+									{{ MIGRATION_COPY.buttons.cancelMigration }}
+								</AppButton>
+							</div>
+							<div v-else-if="ui.showWarmingHint" class="hero-actions row">
+								<p class="hero-resume-hint">{{ ui.subline }}</p>
+								<AppButton variant="ghost" @click="migration.cancel()">
+									{{ MIGRATION_COPY.buttons.cancelMigration }}
+								</AppButton>
+							</div>
+							<div v-else-if="ui.canRestart" class="hero-actions">
 								<AppButton size="lg" @click="migration.start(progress!.migrationId)">
 									Restart
 								</AppButton>
@@ -523,6 +515,8 @@ async function startAnotherMigration() {
 					<SetupFoldersStep
 						v-else-if="step === 'folders'"
 						v-model:folder-mappings="folderMappings"
+						v-model:local-backup-enabled="localBackupEnabled"
+						v-model:backup-parent-dir="backupParentDir"
 						:source-provider="source.provider"
 						:dest-provider="destination.provider"
 						:loading-stats="loadingFolderStats"
@@ -530,8 +524,11 @@ async function startAnotherMigration() {
 						:estimating-size="estimatingSize"
 						:estimate-error="estimateError"
 						:quota-warning="quotaWarning"
+						:backup-disk-error="backupDiskError"
+						:picking-backup-dir="pickingBackupDir"
 						@back="backFromFolders"
 						@retry-stats="mailboxes.loadFolderStats(true)"
+						@pick-backup-dir="pickBackupDir"
 						@start-migration="startMigration"
 					/>
 
@@ -713,9 +710,10 @@ async function startAnotherMigration() {
 }
 .hero-title {
 	margin: 0;
-	font-size: 1.35rem;
+	font-size: 1.85rem;
 	font-weight: 700;
 	letter-spacing: -0.03em;
+	line-height: 1.15;
 }
 .hero-sub {
 	margin: 0.35rem 0 0;

@@ -6,12 +6,16 @@ import {
 	formatDurationCompact,
 } from "../../../shared/migration-duration";
 import { formatBytes, requiresPaidPlan } from "../../../shared/pricing";
+import { BACKUP_COPY } from "../../../shared/backup-copy";
 import { usePricingStore } from "../../stores/pricing";
 import MigrationPaidPlanNotice from "../migration/MigrationPaidPlanNotice.vue";
 import SetupStepHero from "./SetupStepHero.vue";
 import AppDock from "../ui/AppDock.vue";
 
 const folderMappings = defineModel<FolderMapping[]>("folderMappings", { required: true });
+
+const localBackupEnabled = defineModel<boolean>("localBackupEnabled", { default: false });
+const backupParentDir = defineModel<string>("backupParentDir", { required: true });
 
 const props = defineProps<{
 	sourceProvider: MailboxProvider;
@@ -21,12 +25,15 @@ const props = defineProps<{
 	estimatingSize: boolean;
 	estimateError: string | null;
 	quotaWarning: string | null;
+	backupDiskError: string | null;
+	pickingBackupDir: boolean;
 }>();
 
 const emit = defineEmits<{
 	back: [];
 	retryStats: [];
 	startMigration: [];
+	pickBackupDir: [];
 }>();
 
 const pricing = usePricingStore();
@@ -123,7 +130,10 @@ const needsPaidPlan = computed(
 		requiresPaidPlan(selectedBytes.value),
 );
 
+const dockLoading = computed(() => props.loadingStats || props.estimatingSize);
+
 const startButtonLabel = computed(() => {
+	if (props.loadingStats) return "Measuring…";
 	if (props.estimatingSize) return "Checking…";
 
 	const durationSuffix = durationEstimate.value
@@ -138,9 +148,13 @@ const startButtonLabel = computed(() => {
 	return `Start migration${durationSuffix}`;
 });
 
-const canStart = computed(
-	() => selectedCount.value > 0 && !props.estimatingSize && !props.loadingStats,
-);
+const canStart = computed(() => {
+	if (selectedCount.value === 0 || props.estimatingSize || props.loadingStats) {
+		return false;
+	}
+	if (localBackupEnabled.value && props.backupDiskError) return false;
+	return true;
+});
 
 function toggleAll(selected: boolean) {
 	for (const folder of folderMappings.value) {
@@ -169,6 +183,30 @@ function onSelectAllChange(event: Event) {
 				:loading-stats="loadingStats"
 				:has-selection="selectedCount > 0"
 			/>
+
+			<section class="backup-panel" aria-labelledby="backup-heading">
+				<div class="backup-inner">
+					<label class="backup-toggle">
+						<input v-model="localBackupEnabled" type="checkbox" />
+						<span class="backup-toggle-text">
+							<span class="backup-title-row">
+								<span id="backup-heading" class="backup-title">{{ BACKUP_COPY.panelTitle }}</span>
+								<span class="backup-free-badge">{{ BACKUP_COPY.freeBadge }}</span>
+							</span>
+							<span class="backup-hint">{{ BACKUP_COPY.panelHint }}</span>
+						</span>
+					</label>
+					<button
+						v-if="localBackupEnabled"
+						type="button"
+						class="backup-pick-btn"
+						:disabled="pickingBackupDir"
+						@click="emit('pickBackupDir')"
+					>
+						{{ pickingBackupDir ? BACKUP_COPY.openingFolder : BACKUP_COPY.chooseFolder }}
+					</button>
+				</div>
+			</section>
 
 			<section class="folder-panel" aria-labelledby="folder-list-heading">
 				<div class="folder-panel-top">
@@ -228,11 +266,14 @@ function onSelectAllChange(event: Event) {
 		<AppDock
 			:label="startButtonLabel"
 			:disabled="!canStart"
-			:loading="estimatingSize"
+			:loading="dockLoading"
 			@action="emit('startMigration')"
 		>
-			<template v-if="estimateError || quotaWarning" #top>
+			<template v-if="estimateError || quotaWarning || backupDiskError" #top>
 				<p v-if="estimateError" class="dock-error">{{ estimateError }}</p>
+				<p v-else-if="backupDiskError && localBackupEnabled" class="dock-error">
+					{{ backupDiskError }}
+				</p>
 				<p v-else-if="quotaWarning" class="dock-warning">{{ quotaWarning }}</p>
 			</template>
 		</AppDock>
@@ -258,6 +299,90 @@ function onSelectAllChange(event: Event) {
 	gap: 0.65rem;
 	padding: 0 0 var(--app-dock-h-hover);
 	scrollbar-width: thin;
+}
+
+.backup-panel {
+	padding: 0.85rem 1rem;
+	background: linear-gradient(135deg, rgba(13, 148, 136, 0.06) 0%, var(--surface) 55%);
+	border: 1px solid rgba(13, 148, 136, 0.22);
+	border-radius: 16px;
+	box-shadow: 0 4px 24px rgba(0, 0, 0, 0.04);
+}
+
+.backup-inner {
+	display: flex;
+	align-items: center;
+	gap: 0.75rem;
+}
+
+.backup-toggle {
+	display: flex;
+	align-items: center;
+	gap: 0.65rem;
+	flex: 1;
+	min-width: 0;
+	cursor: pointer;
+}
+
+.backup-toggle input {
+	flex-shrink: 0;
+	margin: 0;
+	accent-color: var(--accent, #0d9488);
+}
+
+.backup-toggle-text {
+	display: flex;
+	flex-direction: column;
+	gap: 0.25rem;
+	min-width: 0;
+}
+
+.backup-title-row {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 0.4rem;
+}
+
+.backup-title {
+	font-size: 0.88rem;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+}
+
+.backup-free-badge {
+	font-size: 0.62rem;
+	font-weight: 800;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	padding: 0.15rem 0.45rem;
+	border-radius: 999px;
+	background: rgba(13, 148, 136, 0.14);
+	color: #0f766e;
+}
+
+.backup-hint {
+	font-size: 0.72rem;
+	color: var(--muted);
+	line-height: 1.4;
+}
+
+.backup-pick-btn {
+	flex-shrink: 0;
+	align-self: center;
+	font-size: 0.72rem;
+	font-weight: 600;
+	padding: 0.35rem 0.65rem;
+	border-radius: 8px;
+	border: 1px solid var(--border);
+	background: var(--surface-elevated, #fff);
+	cursor: pointer;
+	white-space: nowrap;
+}
+
+.backup-pick-btn:disabled {
+	opacity: 0.6;
+	cursor: wait;
 }
 
 .folder-panel {

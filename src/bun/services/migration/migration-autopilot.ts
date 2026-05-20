@@ -1,7 +1,8 @@
 import type { MigrationErrorClassification } from "./migration-errors";
+import { MIGRATION_PARALLEL } from "./migration-constants";
 
-/** Retryable errors are retried until success or this cap (per message). */
-export const MAX_RETRYABLE_ATTEMPTS = 100;
+/** Per-message retry cap — enough recovery without hammering servers. */
+export const MAX_RETRYABLE_ATTEMPTS = 10;
 
 /** Fixed migration behavior — not exposed in the UI. */
 export const MIGRATION_TRANSFER_DEFAULTS = {
@@ -14,10 +15,10 @@ export type MigrationTransferConfig = typeof MIGRATION_TRANSFER_DEFAULTS & {
 	parallelConnections: number;
 };
 
-const MIN_LANES = 1;
-const MAX_LANES = 8;
-const START_LANES = 3;
-const STABLE_BATCHES_TO_GROW = 4;
+const MIN_LANES = MIGRATION_PARALLEL.minLanes;
+const MAX_LANES = MIGRATION_PARALLEL.maxLanes;
+const START_LANES = MIGRATION_PARALLEL.startLanes;
+const STABLE_BATCHES_TO_GROW = MIGRATION_PARALLEL.stableBatchesToGrow;
 
 export type MigrationAutopilotState = {
 	laneCount: number;
@@ -48,7 +49,13 @@ export function recordAutopilotRetry(
 		classification.kind === "network"
 	) {
 		state.laneCount = Math.max(MIN_LANES, state.laneCount - 1);
+		return;
 	}
+	state.laneCount = Math.max(MIN_LANES, state.laneCount - 1);
+}
+
+export function getMaxParallelConnections(): number {
+	return MAX_LANES;
 }
 
 export function getTransferConfig(state: MigrationAutopilotState): MigrationTransferConfig {
@@ -73,19 +80,17 @@ export function describeTransferActivity(folderPath: string): string {
 
 export function describeRetryActivity(
 	classification: MigrationErrorClassification,
-	retryAfterMs: number,
 ): string {
-	const seconds = Math.max(1, Math.ceil(retryAfterMs / 1000));
 	switch (classification.kind) {
 		case "throttled":
-			return `Your provider asked us to slow down — continuing in ${seconds}s`;
+			return "Your provider asked us to slow down — still moving your mail";
 		case "connection_lost":
 		case "network":
-			return `Connection hiccup — reconnecting in ${seconds}s`;
+			return "Connection hiccup — reconnecting";
 		case "timeout":
-			return `Server was slow — trying again in ${seconds}s`;
+			return "Server was slow — trying again";
 		default:
-			return `Quick pause — continuing in ${seconds}s`;
+			return "Taking a short break — still moving your mail";
 	}
 }
 

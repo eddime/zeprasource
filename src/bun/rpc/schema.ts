@@ -10,6 +10,7 @@ import type {
 	MigrationRecord,
 	MigrationSizeEstimate,
 	DestinationQuotaCheck,
+	BackupDiskCheck,
 } from "../../shared/types";
 import type {
 	MigrationCheckoutCreateParams,
@@ -85,11 +86,24 @@ export type MailPortRPC = {
 				};
 				response: DestinationQuotaCheck;
 			};
+			getDefaultBackupParentDir: {
+				params: Record<string, never>;
+				response: { defaultPath: string };
+			};
+			pickBackupDirectory: {
+				params: Record<string, never>;
+				response: { path: string | null; defaultPath: string };
+			};
+			checkBackupDiskSpace: {
+				params: { parentDir: string; requiredBytes: number };
+				response: BackupDiskCheck;
+			};
 			startMigration: {
 				params: {
 					source?: MailboxCredentials;
 					destination?: MailboxCredentials;
 					folderMappings?: FolderMapping[];
+					backupRootPath?: string | null;
 					resumeMigrationId?: string;
 					plannedSecondsTypical?: number;
 					launchTicket?: string;
@@ -101,6 +115,10 @@ export type MailPortRPC = {
 				response: { success: boolean };
 			};
 			pauseMigration: {
+				params: { migrationId: string };
+				response: { success: boolean };
+			};
+			resumeMigration: {
 				params: { migrationId: string };
 				response: { success: boolean };
 			};

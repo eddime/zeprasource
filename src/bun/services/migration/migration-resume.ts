@@ -1,6 +1,9 @@
 import type { FolderMapping, MailboxCredentials } from "../../../shared/types";
 import { getDatabase } from "../../db/database";
-import { syncMigrationCounters } from "../../db/migration-repository";
+import {
+	setUserPausedFlag,
+	syncMigrationCounters,
+} from "../../db/migration-repository";
 import { credentialStore } from "../credentials/credential-store";
 import { decryptString } from "../crypto/local-secrets";
 import { loadMailboxCredentialsByRole } from "../imap/mailbox-profile";
@@ -103,6 +106,8 @@ export type MigrationResumePayload = {
 	source: MailboxCredentials;
 	destination: MailboxCredentials;
 	folderMappings: FolderMapping[];
+	/** Parent dir + account subfolder; null when backup disabled. */
+	backupRootPath: string | null;
 };
 
 export function loadMigrationResumePayload(
@@ -111,13 +116,14 @@ export function loadMigrationResumePayload(
 	const db = getDatabase();
 	const row = db
 		.query(
-			`SELECT id, status, source_email, dest_email FROM migrations WHERE id = ?`,
+			`SELECT id, status, source_email, dest_email, backup_root_path FROM migrations WHERE id = ?`,
 		)
 		.get(migrationId) as {
 		id: string;
 		status: string;
 		source_email: string;
 		dest_email: string;
+		backup_root_path: string | null;
 	} | null;
 
 	if (!row) return null;
@@ -143,7 +149,13 @@ export function loadMigrationResumePayload(
 		return null;
 	}
 
-	return { migrationId, source, destination, folderMappings };
+	let backupRootPath: string | null = null;
+	if (row.backup_root_path) {
+		backupRootPath =
+			decryptString(row.backup_root_path) ?? row.backup_root_path;
+	}
+
+	return { migrationId, source, destination, folderMappings, backupRootPath };
 }
 
 /** Crash-safe: in-flight "running" rows become pausable checkpoints. */
@@ -155,6 +167,7 @@ export function checkpointInterruptedMigrations(): string[] {
 
 	for (const { id } of rows) {
 		syncMigrationCounters(id);
+		setUserPausedFlag(id, false);
 		db.prepare(
 			`UPDATE migrations SET status = 'paused', updated_at = datetime('now') WHERE id = ?`,
 		).run(id);

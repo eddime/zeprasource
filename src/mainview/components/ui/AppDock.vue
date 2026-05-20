@@ -33,7 +33,7 @@ watch(isInactive, (inactive, wasInactive) => {
 
 const iconKind = computed((): "migrate" | "pending" | "measure" | null => {
 	if (props.loading) return null;
-	if (props.label === "Almost there") return "pending";
+	if (props.label === "Waiting for connection") return "pending";
 	if (props.label.includes("Measuring")) return "measure";
 	return "migrate";
 });

@@ -5,6 +5,7 @@ import {
 	pauseMigrationForShutdown,
 } from "./migration-resume";
 import { assertMigrationResumeLicense } from "../stripe/migration-payment-entitlements";
+import { isUserPausedMigration } from "../../db/migration-repository";
 import {
 	enqueueMigration,
 	getActiveMigrationIds,
@@ -25,6 +26,13 @@ export function resumeInterruptedMigrations(emit: ProgressEmitter): void {
 		if (candidates.length === 0) return;
 
 		for (const migrationId of candidates) {
+			if (isUserPausedMigration(migrationId)) {
+				logger.info(
+					"migration",
+					`Auto-resume skipped for ${migrationId} — paused by user`,
+				);
+				continue;
+			}
 			if (getActiveMigrationIds().includes(migrationId)) continue;
 			if (getActiveMigrationIds().length >= MAX_CONCURRENT_MIGRATIONS) {
 				logger.info(

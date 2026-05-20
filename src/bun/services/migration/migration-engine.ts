@@ -8,15 +8,25 @@ import type {
 import { getDatabase } from "../../db/database";
 import { encryptString, hashString } from "../crypto/local-secrets";
 import { estimateRemainingDuration } from "../../../shared/migration-duration";
+import { MIGRATION_COPY } from "../../../shared/migration-copy";
+import {
+	buildRetryEndsAt,
+	clearTransientActivity,
+	runningProgressExtras,
+	sanitizeMigrationProgress,
+} from "../../../shared/migration-progress";
 import {
 	getMigrationById,
 	getMigrationProgressSnapshot,
 	incrementMigrationCounters,
 	markFolderCompleted,
 	markMigrationMessage,
+	markMissingFolderMessagesFailed,
 	refreshMigrationMessagesTotal,
 	seedMigrationFolderTotals,
 	setMigrationStatus,
+	setUserPausedFlag,
+	isUserPausedMigration,
 	syncMigrationCounters,
 	updateFolderScannedTotal,
 } from "../../db/migration-repository";
@@ -82,24 +92,36 @@ type LiveProgressState = {
 	bytesTransferred: number;
 };
 
+function engineStatus(ctx: MigrationContext): MigrationStatus {
+	if (ctx.cancelled) return "cancelled";
+	if (ctx.paused) return "paused";
+	return "running";
+}
+
 function emitLiveProgress(
 	emit: ProgressEmitter,
-	migrationId: string,
+	ctx: MigrationContext,
 	state: LiveProgressState,
 	extras?: Partial<MigrationProgress>,
 ): void {
-	emit({
-		migrationId,
-		status: "running",
-		foldersTotal: state.foldersTotal,
-		foldersCompleted: state.foldersCompleted,
-		messagesTotal: state.messagesTotal,
-		messagesCompleted: state.messagesCompleted,
-		messagesFailed: state.messagesFailed,
-		bytesTransferred: state.bytesTransferred,
-		...extras,
-		updatedAt: new Date().toISOString(),
-	});
+	const userPaused = ctx.paused && isUserPausedMigration(ctx.migrationId);
+	const safeExtras = userPaused ? { ...extras, ...clearTransientActivity() } : extras;
+
+	emit(
+		sanitizeMigrationProgress({
+			migrationId: ctx.migrationId,
+			status: engineStatus(ctx),
+			userInitiatedPause: userPaused ? true : undefined,
+			foldersTotal: state.foldersTotal,
+			foldersCompleted: state.foldersCompleted,
+			messagesTotal: state.messagesTotal,
+			messagesCompleted: state.messagesCompleted,
+			messagesFailed: state.messagesFailed,
+			bytesTransferred: state.bytesTransferred,
+			...safeExtras,
+			updatedAt: new Date().toISOString(),
+		}),
+	);
 }
 
 interface MigrationContext {
@@ -107,6 +129,7 @@ interface MigrationContext {
 	source: MailboxCredentials;
 	destination: MailboxCredentials;
 	folderMappings: FolderMapping[];
+	backupRootPath: string | null;
 	cancelled: boolean;
 	paused: boolean;
 	autopilot: MigrationAutopilotState;
@@ -132,6 +155,7 @@ export function pauseMigration(migrationId: string): void {
 	const ctx = activeMigrations.get(migrationId);
 	if (ctx) ctx.paused = true;
 	syncMigrationCounters(migrationId);
+	setUserPausedFlag(migrationId, true);
 	setMigrationStatus(migrationId, "paused");
 }
 
@@ -140,10 +164,42 @@ export function unpauseMigration(migrationId: string): void {
 	if (ctx) ctx.paused = false;
 }
 
+/**
+ * Continue a user-paused migration. If the engine task is still in memory, only
+ * clears the pause flag. Otherwise starts a new background run (after crash).
+ */
+export async function resumeMigration(
+	migrationId: string,
+	emit: ProgressEmitter,
+): Promise<void> {
+	// Always unpause the in-memory engine when it still exists — never delete the map
+	// entry while executeMigration is running (would orphan a live transfer).
+	if (activeMigrations.has(migrationId)) {
+		unpauseMigration(migrationId);
+		setUserPausedFlag(migrationId, false);
+		setMigrationStatus(migrationId, "running", null);
+		const snapshot = getMigrationProgressSnapshot(
+			migrationId,
+			"running",
+			runningProgressExtras(),
+			{ reconcile: true },
+		);
+		if (snapshot) emit(snapshot);
+		return;
+	}
+
+	setUserPausedFlag(migrationId, false);
+	setMigrationStatus(migrationId, "running", null);
+	activeMigrationSlots.delete(migrationId);
+
+	await enqueueMigration({ resumeMigrationId: migrationId }, emit);
+}
+
 type StartMigrationParams = {
 	source?: MailboxCredentials;
 	destination?: MailboxCredentials;
 	folderMappings?: FolderMapping[];
+	backupRootPath?: string | null;
 	resumeMigrationId?: string;
 	plannedSecondsTypical?: number;
 	verifiedLicense?: VerifiedLaunchLicense | null;
@@ -181,12 +237,17 @@ export async function prepareMigrationStart(
 		const destRef = `migration/${migrationId}/destination`;
 		const license = params.verifiedLicense ?? null;
 
+		const backupStored = params.backupRootPath?.trim()
+			? encryptString(params.backupRootPath.trim())
+			: null;
+
 		db.prepare(
 			`INSERT INTO migrations (
         id, source_profile_id, dest_profile_id, source_email, dest_email,
         status, folders_total, folder_mappings, started_at, updated_at,
-        stripe_session_id, license_jti, licensed_total_bytes, license_folder_hash
-      ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, datetime('now'), datetime('now'), ?, ?, ?, ?)`,
+        stripe_session_id, license_jti, licensed_total_bytes, license_folder_hash,
+        backup_root_path
+      ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, datetime('now'), datetime('now'), ?, ?, ?, ?, ?)`,
 		).run(
 			migrationId,
 			sourceRef,
@@ -199,6 +260,7 @@ export async function prepareMigrationStart(
 			license?.jti ?? null,
 			license?.totalBytes ?? null,
 			license?.folderPathsHash ?? null,
+			backupStored,
 		);
 
 		if (license) {
@@ -238,6 +300,7 @@ export async function executeMigration(
 		source: payload.source,
 		destination: payload.destination,
 		folderMappings: payload.folderMappings,
+		backupRootPath: payload.backupRootPath,
 		cancelled: false,
 		paused: false,
 		autopilot: createAutopilotState(),
@@ -272,15 +335,27 @@ export async function executeMigration(
 			messagesFailed: baseline?.messagesFailed ?? 0,
 			bytesTransferred: baseline?.bytesTransferred ?? 0,
 		};
-		if (baseline) emit(baseline);
+		if (baseline) {
+			emit(
+				sanitizeMigrationProgress({
+					...baseline,
+					status: engineStatus(ctx),
+					userInitiatedPause:
+						ctx.paused && isUserPausedMigration(ctx.migrationId) ? true : undefined,
+				}),
+			);
+		}
 
-		emitLiveProgress(emit, migrationId, live, {
+		emitLiveProgress(emit, ctx, live, {
 			activityPhase: "connecting",
-			activityLabel: "Connected — starting your move…",
+			activityLabel: MIGRATION_COPY.running.connecting,
 		});
 
+		let lastRetryClassification: MigrationErrorClassification | null = null;
+		let lastRetryUiEmitAt = 0;
+
 		const transferHooks = (mapping: FolderMapping) => ({
-			shouldStop: () => ctx.cancelled,
+			shouldStop: () => ctx.cancelled || ctx.paused,
 			waitWhilePaused: async () => {
 				while (ctx.paused) {
 					await Bun.sleep(250);
@@ -304,7 +379,7 @@ export async function executeMigration(
 						messagesTotal: live.messagesTotal,
 						plannedSecondsTypical: ctx.plannedSecondsTypical,
 					});
-				emitLiveProgress(emit, migrationId, live, {
+				emitLiveProgress(emit, ctx, live, {
 					currentFolder: mapping.sourcePath,
 					activityPhase: "transferring",
 					activityLabel: describeTransferActivity(mapping.sourcePath),
@@ -319,24 +394,49 @@ export async function executeMigration(
 				if (snap) {
 					live.messagesFailed = snap.messagesFailed;
 					live.messagesCompleted = snap.messagesCompleted;
+					live.messagesTotal = snap.messagesTotal;
 				}
+				const remaining = countFailedUids(migrationId, selectedMappings);
+				emitLiveProgress(emit, ctx, live, {
+					currentFolder: mapping.sourcePath,
+					activityPhase: "transferring",
+					activityLabel:
+						remaining > 0
+							? describeStillWorkingActivity(remaining)
+							: describeTransferActivity(mapping.sourcePath),
+				});
 			},
 			onRetry: (
 				_uid: number,
 				classification: MigrationErrorClassification,
 				retryAfterMs: number,
 			) => {
+				if (ctx.paused || ctx.cancelled) return;
+				lastRetryClassification = classification;
 				recordAutopilotRetry(ctx.autopilot, classification);
+				const now = Date.now();
+				if (now - lastRetryUiEmitAt < 5_000) return;
+				lastRetryUiEmitAt = now;
 				const activityPhase = classification.reconnect
 					? "reconnecting"
 					: classification.kind === "throttled"
 						? "throttled"
 						: "retrying";
-				emitLiveProgress(emit, migrationId, live, {
+				emitLiveProgress(emit, ctx, live, {
 					currentFolder: mapping.sourcePath,
 					activityPhase,
-					activityLabel: describeRetryActivity(classification, retryAfterMs),
-					retryAfterMs,
+					activityLabel: describeRetryActivity(classification),
+					retryEndsAt: buildRetryEndsAt(retryAfterMs),
+				});
+			},
+			afterRetryWait: () => {
+				if (ctx.paused || ctx.cancelled) return;
+				lastRetryClassification = null;
+				emitLiveProgress(emit, ctx, live, {
+					currentFolder: mapping.sourcePath,
+					...runningProgressExtras(),
+					activityPhase: "transferring",
+					activityLabel: describeTransferActivity(mapping.sourcePath),
 				});
 			},
 			onBatchFinished: () => {
@@ -346,12 +446,18 @@ export async function executeMigration(
 
 		for (const mapping of selectedMappings) {
 			if (ctx.cancelled) break;
-			while (ctx.paused) {
-				await Bun.sleep(250);
-				if (ctx.cancelled) break;
-			}
 
-			emitLiveProgress(emit, migrationId, live, {
+			folderPass: while (true) {
+				while (ctx.paused) {
+					emitLiveProgress(emit, ctx, live, {
+						activityLabel: MIGRATION_COPY.userPaused.hint,
+					});
+					await Bun.sleep(500);
+					if (ctx.cancelled) break folderPass;
+				}
+				if (ctx.paused || ctx.cancelled) break folderPass;
+
+				emitLiveProgress(emit, ctx, live, {
 				currentFolder: mapping.sourcePath,
 				activityPhase: "scanning",
 				activityLabel: describeScanningActivity(mapping.sourcePath),
@@ -371,10 +477,10 @@ export async function executeMigration(
 				) as { status: string } | null;
 
 			if (folderRow?.status === "completed") {
-				emitLiveProgress(emit, migrationId, live, {
+				emitLiveProgress(emit, ctx, live, {
 					currentFolder: mapping.sourcePath,
 				});
-				continue;
+				break folderPass;
 			}
 
 			db.prepare(
@@ -409,10 +515,11 @@ export async function executeMigration(
 						uid,
 					) as { status: string } | null;
 				if (!existing) return true;
+				if (existing.status === "failed") return false;
 				return existing.status !== "completed";
 			});
 
-			emitLiveProgress(emit, migrationId, live, {
+			emitLiveProgress(emit, ctx, live, {
 				currentFolder: mapping.sourcePath,
 				activityPhase: "transferring",
 				activityLabel: describeTransferActivity(mapping.sourcePath),
@@ -427,36 +534,80 @@ export async function executeMigration(
 				destClient,
 				pendingUids,
 				transfer: getTransferConfig(ctx.autopilot),
+				backupRootPath: ctx.backupRootPath,
 				markMessage: markMigrationMessage,
 				hooks: transferHooks(mapping),
 			});
+
+			markMissingFolderMessagesFailed(migrationId, mapping.sourcePath, uids);
+			syncMigrationCounters(migrationId);
+			const midFolder = getMigrationProgressSnapshot(migrationId, "running", undefined, {
+				reconcile: true,
+			});
+			if (midFolder) {
+				live.messagesCompleted = midFolder.messagesCompleted;
+				live.messagesFailed = midFolder.messagesFailed;
+				live.messagesTotal = midFolder.messagesTotal;
+				emitLiveProgress(emit, ctx, live, {
+					currentFolder: mapping.sourcePath,
+					activityPhase: "transferring",
+					activityLabel: describeTransferActivity(mapping.sourcePath),
+				});
+			}
+
+			if (ctx.paused) {
+				emitLiveProgress(emit, ctx, live, {
+					currentFolder: mapping.sourcePath,
+					activityLabel: MIGRATION_COPY.userPaused.hint,
+				});
+				continue folderPass;
+			}
+			if (ctx.cancelled) break folderPass;
 
 			markFolderCompleted(migrationId, mapping.sourcePath);
 			live.foldersCompleted += 1;
 			live.messagesTotal = refreshMigrationMessagesTotal(migrationId);
 			syncMigrationCounters(migrationId);
-			const afterFolder = getMigrationProgressSnapshot(migrationId, "running", undefined, {
-				reconcile: true,
-			});
+			const afterFolder = getMigrationProgressSnapshot(
+				migrationId,
+				engineStatus(ctx),
+				undefined,
+				{ reconcile: true },
+			);
 			if (afterFolder) {
 				live.messagesCompleted = afterFolder.messagesCompleted;
 				live.messagesFailed = afterFolder.messagesFailed;
 				live.bytesTransferred = afterFolder.bytesTransferred;
 				live.foldersCompleted = afterFolder.foldersCompleted;
 				live.messagesTotal = afterFolder.messagesTotal;
-				emit(afterFolder);
+				emit(
+					sanitizeMigrationProgress({
+						...afterFolder,
+						status: engineStatus(ctx),
+						userInitiatedPause:
+							ctx.paused && isUserPausedMigration(ctx.migrationId) ? true : undefined,
+					}),
+				);
+			}
+				break folderPass;
 			}
 		}
 
-		if (!ctx.cancelled) {
-			ctx.autopilot.laneCount = Math.min(8, ctx.autopilot.laneCount + 1);
+		while (ctx.paused && !ctx.cancelled) {
+			emitLiveProgress(emit, ctx, live, {
+				activityLabel: MIGRATION_COPY.userPaused.hint,
+			});
+			await Bun.sleep(500);
+		}
+
+		if (!ctx.cancelled && !ctx.paused) {
 			for (let sweep = 0; sweep < MAX_FAILURE_SWEEPS; sweep++) {
-				if (ctx.cancelled) break;
+				if (ctx.cancelled || ctx.paused) break;
 				syncMigrationCounters(migrationId);
 				const remaining = countFailedUids(migrationId, selectedMappings);
 				if (remaining === 0) break;
 
-				emitLiveProgress(emit, migrationId, live, {
+				emitLiveProgress(emit, ctx, live, {
 					activityPhase: "transferring",
 					activityLabel:
 						sweep === 0
@@ -472,6 +623,7 @@ export async function executeMigration(
 					destination,
 					destClient,
 					transfer: getTransferConfig(ctx.autopilot),
+					backupRootPath: ctx.backupRootPath,
 					markMessage: markMigrationMessage,
 					hooksForMapping: (mapping) => transferHooks(mapping),
 				});
@@ -490,7 +642,22 @@ export async function executeMigration(
 			}
 		}
 
+		while (ctx.paused && !ctx.cancelled) {
+			emitLiveProgress(emit, ctx, live, {
+				activityLabel: MIGRATION_COPY.userPaused.hint,
+			});
+			await Bun.sleep(500);
+		}
+
 		syncMigrationCounters(migrationId);
+		const finalSnap = getMigrationProgressSnapshot(migrationId, "running", undefined, {
+			reconcile: true,
+		});
+		if (finalSnap) {
+			live.messagesCompleted = finalSnap.messagesCompleted;
+			live.messagesFailed = finalSnap.messagesFailed;
+			live.messagesTotal = finalSnap.messagesTotal;
+		}
 		const remainingFailed = countFailedUids(migrationId, selectedMappings);
 		live.messagesFailed = remainingFailed;
 
@@ -499,6 +666,7 @@ export async function executeMigration(
 		if (ctx.cancelled) {
 			finalStatus = "cancelled";
 		} else if (remainingFailed > 0) {
+			setUserPausedFlag(migrationId, false);
 			if (hasOnlyPermanentFailures(db, migrationId, selectedMappings)) {
 				finalStatus = "paused";
 				completionNote = describeCompletionSummary(remainingFailed);
@@ -527,6 +695,7 @@ export async function executeMigration(
 		}
 
 		syncMigrationCounters(migrationId);
+		setUserPausedFlag(migrationId, false);
 		setMigrationStatus(migrationId, "paused", errMsg);
 		const pausedProgress = getMigrationProgressSnapshot(
 			migrationId,

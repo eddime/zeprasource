@@ -138,6 +138,12 @@ function applySchemaMigrations(database: Database): void {
 	if (!names.has("license_folder_hash")) {
 		addColumn("ALTER TABLE migrations ADD COLUMN license_folder_hash TEXT");
 	}
+	if (!names.has("backup_root_path")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN backup_root_path TEXT");
+	}
+	if (!names.has("user_paused")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN user_paused INTEGER NOT NULL DEFAULT 0");
+	}
 }
 
 let db: Database | null = null;

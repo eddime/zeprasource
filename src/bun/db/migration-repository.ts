@@ -1,3 +1,4 @@
+import { sanitizeMigrationProgress } from "../../shared/migration-progress";
 import type {
 	FolderMapping,
 	MigrationProgress,
@@ -64,11 +65,16 @@ export function syncMigrationCounters(migrationId: string): void {
 		existing.folders_completed,
 		folders.folders_completed,
 	);
-	const messagesTotal = Math.max(
+	const accounted = messagesCompleted + messagesFailed;
+	const outstanding = countOutstandingMessages(migrationId);
+	let messagesTotal = Math.max(
 		existing.messages_total,
 		folders.messages_total,
-		messagesCompleted + messagesFailed,
+		accounted,
 	);
+	if (outstanding === 0 && accounted > 0) {
+		messagesTotal = accounted;
+	}
 
 	database
 		.prepare(
@@ -91,13 +97,26 @@ export function syncMigrationCounters(migrationId: string): void {
 		);
 }
 
+export function setUserPausedFlag(migrationId: string, paused: boolean): void {
+	getDatabase()
+		.prepare(`UPDATE migrations SET user_paused = ?, updated_at = datetime('now') WHERE id = ?`)
+		.run(paused ? 1 : 0, migrationId);
+}
+
+export function isUserPausedMigration(migrationId: string): boolean {
+	const row = getDatabase()
+		.query(`SELECT user_paused FROM migrations WHERE id = ?`)
+		.get(migrationId) as { user_paused: number } | null;
+	return row?.user_paused === 1;
+}
+
 export function getMigrationById(id: string): MigrationRecord | null {
 	const database = getDatabase();
 	const row = database
 		.query(
 			`SELECT id, source_email, dest_email, status, folders_total, folders_completed,
         messages_total, messages_completed, messages_failed, bytes_transferred,
-        created_at, started_at, completed_at, error
+        created_at, started_at, completed_at, error, user_paused
        FROM migrations WHERE id = ?`,
 		)
 		.get(id) as {
@@ -115,6 +134,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 		started_at: string | null;
 		completed_at: string | null;
 		error: string | null;
+		user_paused: number;
 	} | null;
 
 	if (!row) return null;
@@ -149,9 +169,14 @@ export function getMigrationProgressSnapshot(
 	const record = getMigrationById(migrationId);
 	if (!record) return null;
 
-	return {
+	const userInitiatedPause =
+		extras?.userInitiatedPause ??
+		(record.status === "paused" && isUserPausedMigration(migrationId));
+
+	return sanitizeMigrationProgress({
 		migrationId: record.id,
 		status: statusOverride ?? record.status,
+		userInitiatedPause: userInitiatedPause || undefined,
 		foldersTotal: record.foldersTotal,
 		foldersCompleted: record.foldersCompleted,
 		messagesTotal: record.messagesTotal,
@@ -162,7 +187,7 @@ export function getMigrationProgressSnapshot(
 		startedAt: record.startedAt,
 		updatedAt: new Date().toISOString(),
 		...extras,
-	};
+	});
 }
 
 /** Seed folder rows and migration.messages_total from the folder-selection step estimates. */
@@ -199,7 +224,36 @@ export function seedMigrationFolderTotals(
 	return estimatedTotal;
 }
 
-/** After IMAP folder scan: never lower totals (keeps folder-view estimate stable). */
+/** Messages in scanned folders not yet marked completed or failed. */
+export function countOutstandingMessages(migrationId: string): number {
+	const database = getDatabase();
+	const folders = database
+		.query(
+			`SELECT messages_total, source_path, source_path_hash
+       FROM migration_folders WHERE migration_id = ?`,
+		)
+		.all(migrationId) as Array<{
+		messages_total: number;
+		source_path: string;
+		source_path_hash: string;
+	}>;
+
+	let outstanding = 0;
+	for (const folder of folders) {
+		const touched = database
+			.query(
+				`SELECT COUNT(*) AS n FROM migration_messages
+         WHERE migration_id = ?
+           AND (source_folder_hash = ? OR source_folder = ?)
+           AND status IN ('completed', 'failed')`,
+			)
+			.get(migrationId, folder.source_path_hash, folder.source_path) as { n: number };
+		outstanding += Math.max(0, folder.messages_total - touched.n);
+	}
+	return outstanding;
+}
+
+/** After IMAP folder scan: use server truth (can be lower than pre-migration estimate). */
 export function updateFolderScannedTotal(
 	migrationId: string,
 	sourcePath: string,
@@ -217,7 +271,7 @@ export function updateFolderScannedTotal(
 			sourcePath,
 		) as { messages_total: number } | null;
 
-	const nextTotal = Math.max(row?.messages_total ?? 0, scannedCount);
+	const nextTotal = scannedCount;
 	database
 		.prepare(
 			`UPDATE migration_folders
@@ -243,11 +297,16 @@ export function refreshMigrationMessagesTotal(migrationId: string): number {
 		)
 		.get(migrationId) as { total: number };
 
-	const existing = database
-		.query(`SELECT messages_total FROM migrations WHERE id = ?`)
-		.get(migrationId) as { messages_total: number } | null;
+	const accounted = database
+		.query(
+			`SELECT
+        COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) AS completed,
+        COALESCE(SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END), 0) AS failed
+       FROM migration_messages WHERE migration_id = ?`,
+		)
+		.get(migrationId) as { completed: number; failed: number };
 
-	const total = Math.max(existing?.messages_total ?? 0, sumRow.total);
+	const total = Math.max(sumRow.total, accounted.completed + accounted.failed);
 	database
 		.prepare(
 			`UPDATE migrations SET messages_total = ?, updated_at = datetime('now') WHERE id = ?`,
@@ -255,6 +314,46 @@ export function refreshMigrationMessagesTotal(migrationId: string): number {
 		.run(total, migrationId);
 
 	return total;
+}
+
+/** UIDs scanned on the server but never written to migration_messages. */
+export function markMissingFolderMessagesFailed(
+	migrationId: string,
+	sourcePath: string,
+	scannedUids: number[],
+): number {
+	const database = getDatabase();
+	const folderHash = hashString(`migration-message-folder:${migrationId}`, sourcePath);
+	let marked = 0;
+
+	for (const uid of scannedUids) {
+		const row = database
+			.query(
+				`SELECT status FROM migration_messages
+         WHERE migration_id = ?
+           AND (source_folder_hash = ? OR source_folder = ?)
+           AND source_uid = ?`,
+			)
+			.get(migrationId, folderHash, sourcePath, uid) as { status: string } | null;
+
+		if (row) continue;
+
+		markMigrationMessage(
+			database,
+			migrationId,
+			sourcePath,
+			uid,
+			"failed",
+			0,
+			undefined,
+			"Not transferred — will retry",
+			0,
+		);
+		marked += 1;
+	}
+
+	if (marked > 0) syncMigrationCounters(migrationId);
+	return marked;
 }
 
 export function listFailedUidsForFolder(

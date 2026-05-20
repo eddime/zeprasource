@@ -4,6 +4,7 @@ import {
 	estimateRemainingDuration,
 	formatDurationCompact,
 	formatDurationLabel,
+	formatMigrationDurationHint,
 } from "../migration-duration";
 
 const gb = (n: number) => n * 1024 ** 3;
@@ -49,6 +50,18 @@ describe("estimateMigrationDuration", () => {
 	});
 });
 
+describe("formatMigrationDurationHint", () => {
+	test("single compact range without duplicate wording", () => {
+		const d = estimateMigrationDuration({
+			totalBytes: 50 * 1024 ** 2,
+			messageCount: 500,
+		});
+		const hint = formatMigrationDurationHint(d);
+		expect(hint).not.toContain("(");
+		expect(hint).toMatch(/\d/);
+	});
+});
+
 describe("formatDurationLabel", () => {
 	test("prefixes with tilde", () => {
 		expect(formatDurationLabel(7200)).toBe("~2 hours");
@@ -78,7 +91,7 @@ describe("estimateRemainingDuration", () => {
 			messagesCompleted: 50,
 			messagesTotal: 100,
 		});
-		expect(label).toMatch(/left$/);
+		expect(label).toMatch(/^About .+ left$/);
 	});
 
 	test("stays near preflight plan at 67% progress", () => {

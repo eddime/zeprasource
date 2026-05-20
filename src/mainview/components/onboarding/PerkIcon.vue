@@ -1,5 +1,5 @@
 <script setup lang="ts">
-export type PerkIconKind = "mac" | "direct" | "resume" | "folders";
+export type PerkIconKind = "mac" | "direct" | "resume" | "folders" | "backup";
 
 defineProps<{
 	kind: PerkIconKind;
@@ -40,6 +40,13 @@ defineProps<{
 			<path d="M17.5 4.5V9h-4.5" />
 			<path d="M20 12a8 8 0 0 1-13.5 5.8" />
 			<path d="M6.5 19.5V15H11" />
+		</template>
+
+		<!-- Local backup -->
+		<template v-else-if="kind === 'backup'">
+			<path d="M4 8.5V18a1.5 1.5 0 0 0 1.5 1.5H14A1.5 1.5 0 0 0 15.5 16.5V10.2L19.5 6H9L7 4H4.5A1.5 1.5 0 0 0 3 5.5V8" />
+			<path d="M12 13v5" />
+			<path d="M9.5 15.5 12 18l2.5-2.5" />
 		</template>
 
 		<!-- Folder + flag -->

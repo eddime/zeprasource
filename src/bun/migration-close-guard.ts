@@ -1,5 +1,6 @@
 import Electrobun, { BrowserWindow, Utils } from "electrobun/bun";
 import { BrowserWindowMap } from "../../node_modules/electrobun/dist/api/bun/core/BrowserWindow";
+import { MIGRATION_COPY } from "../shared/migration-copy";
 import { getMigrationById } from "./db/migration-repository";
 import { getResumableMigrations } from "./services/migration/migration-engine";
 import { pauseAllMigrationsForShutdown } from "./services/migration/migration-orchestrator";
@@ -25,11 +26,10 @@ function isMigrationActive(): boolean {
 function promptQuitDuringMigration(): boolean {
 	const pending = Utils.showMessageBox({
 		type: "warning",
-		title: "Migration läuft noch",
-		message: "Migration läuft noch — wirklich beenden?",
-		detail:
-			"Minimiere Zepra (gelber Button), dann läuft die Migration weiter. Beim Schließen wird pausiert und beim nächsten Öffnen automatisch fortgesetzt.",
-		buttons: ["Weiter migrieren", "App beenden"],
+		title: MIGRATION_COPY.closeGuard.title,
+		message: MIGRATION_COPY.closeGuard.message,
+		detail: MIGRATION_COPY.closeGuard.detail,
+		buttons: [MIGRATION_COPY.closeGuard.keepMigrating, MIGRATION_COPY.closeGuard.quit],
 		defaultId: 0,
 		cancelId: 0,
 	});

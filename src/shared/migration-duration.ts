@@ -90,6 +90,14 @@ export function formatDurationRange(secondsMin: number, secondsMax: number): str
 	return `about ${minLabel}–${maxLabel}`;
 }
 
+/** One line for UI — avoids "~10 minutes (about 10 minutes–15 minutes)". */
+export function formatMigrationDurationHint(estimate: MigrationDurationEstimate): string {
+	const min = formatDurationCompact(estimate.secondsMin);
+	const max = formatDurationCompact(estimate.secondsMax);
+	if (min === max) return formatDurationLabel(estimate.secondsTypical);
+	return `${min}–${max}`;
+}
+
 export function estimateMigrationDuration(input: {
 	totalBytes: number;
 	messageCount: number;
@@ -165,5 +173,6 @@ export function estimateRemainingDuration(input: {
 	}
 
 	if (remainingSeconds === undefined || remainingSeconds < 10) return undefined;
-	return `${formatDurationLabel(remainingSeconds)} left`;
+	const human = formatDurationSeconds(remainingSeconds).replace(/^about /, "");
+	return `About ${human} left`;
 }

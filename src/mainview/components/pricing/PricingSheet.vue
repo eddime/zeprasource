@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { watch } from "vue";
 import stripeWordmark from "@/assets/stripe-wordmark.svg";
+import { BACKUP_COPY } from "../../../shared/backup-copy";
 import { PRICING_TIER_LIMITS_GB } from "../../../shared/pricing";
 import { usePricingStore } from "../../stores/pricing";
 
@@ -97,6 +98,7 @@ function close() {
 							for most. Bigger mailbox? Fair <strong>one-time payment</strong>. No stress, as it
 							should be.
 						</p>
+						<p class="lead lead-backup">{{ BACKUP_COPY.pricingLead }}</p>
 					</header>
 
 					<p v-if="pricing.loading" class="plans-loading">Loading prices from Stripe…</p>
@@ -267,6 +269,11 @@ h2 {
 
 .lead-2 {
 	margin-top: 0.45rem;
+}
+
+.lead-backup {
+	margin-top: 0.4rem;
+	font-size: 0.78rem;
 }
 
 .lead strong {
