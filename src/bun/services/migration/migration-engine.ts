@@ -1,5 +1,4 @@
 import { randomUUID } from "node:crypto";
-import type { Database } from "bun:sqlite";
 import type {
 	FolderMapping,
 	MailboxCredentials,
@@ -11,6 +10,7 @@ import {
 	getMigrationProgressSnapshot,
 	incrementMigrationCounters,
 	markFolderCompleted,
+	markMigrationMessage,
 	refreshMigrationMessagesTotal,
 	seedMigrationFolderTotals,
 	setMigrationStatus,
@@ -282,7 +282,7 @@ export async function executeMigration(
 				destClient,
 				pendingUids,
 				settings,
-				markMessage,
+				markMessage: markMigrationMessage,
 				hooks: {
 					shouldStop: () => ctx.cancelled,
 					waitWhilePaused: async () => {
@@ -382,29 +382,6 @@ export async function startMigration(
 	const migrationId = await prepareMigrationStart(params);
 	await executeMigration(migrationId, emit);
 	return migrationId;
-}
-
-function markMessage(
-	db: Database,
-	migrationId: string,
-	folder: string,
-	uid: number,
-	status: string,
-	sizeBytes: number,
-	messageId?: string,
-	error?: string,
-): void {
-	db.prepare(
-		`INSERT INTO migration_messages (
-      migration_id, source_folder, source_uid, message_id, status, size_bytes, error, transferred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(migration_id, source_folder, source_uid) DO UPDATE SET
-      status = excluded.status,
-      size_bytes = excluded.size_bytes,
-      message_id = excluded.message_id,
-      error = excluded.error,
-      transferred_at = excluded.transferred_at`,
-	).run(migrationId, folder, uid, messageId ?? null, status, sizeBytes, error ?? null);
 }
 
 export function getResumableMigrations(): string[] {

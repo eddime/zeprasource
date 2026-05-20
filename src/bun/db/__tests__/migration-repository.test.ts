@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { getDatabase } from "../database";
 import {
 	getMigrationProgressSnapshot,
+	markMigrationMessage,
 	seedMigrationFolderTotals,
 	syncMigrationCounters,
 	updateFolderScannedTotal,
@@ -100,5 +101,48 @@ describe("migration-repository", () => {
 
 		const afterScan = updateFolderScannedTotal(migrationId, "INBOX", 50);
 		expect(afterScan).toBe(200);
+	});
+
+	test("markMigrationMessage upserts transfer status for a source uid", () => {
+		const db = getDatabase();
+		const migrationId = "test-migration-4";
+
+		db.prepare(
+			`INSERT INTO migrations (
+        id, source_profile_id, dest_profile_id, source_email, dest_email,
+        status, folders_total, started_at, updated_at
+      ) VALUES (?, 's', 'd', 'a@test.com', 'b@test.com', 'running', 1, datetime('now'), datetime('now'))`,
+		).run(migrationId);
+
+		markMigrationMessage(db, migrationId, "INBOX", 42, "failed", 0, undefined, "boom");
+		markMigrationMessage(
+			db,
+			migrationId,
+			"INBOX",
+			42,
+			"completed",
+			1234,
+			"<m@example.com>",
+		);
+
+		const row = db
+			.query(
+				`SELECT status, size_bytes, message_id, error
+         FROM migration_messages
+         WHERE migration_id = ? AND source_folder = 'INBOX' AND source_uid = 42`,
+			)
+			.get(migrationId) as {
+			status: string;
+			size_bytes: number;
+			message_id: string | null;
+			error: string | null;
+		};
+
+		expect(row).toEqual({
+			status: "completed",
+			size_bytes: 1234,
+			message_id: "<m@example.com>",
+			error: null,
+		});
 	});
 });

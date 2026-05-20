@@ -4,6 +4,7 @@ import type {
 	MigrationRecord,
 	MigrationStatus,
 } from "../../shared/types";
+import type { Database } from "bun:sqlite";
 import { getDatabase } from "./database";
 
 export function resetDatabaseSingleton(): void {
@@ -256,6 +257,31 @@ export function incrementMigrationCounters(
 			)
 			.run(delta.failed, migrationId);
 	}
+}
+
+export function markMigrationMessage(
+	database: Database,
+	migrationId: string,
+	folder: string,
+	uid: number,
+	status: string,
+	sizeBytes: number,
+	messageId?: string,
+	error?: string,
+): void {
+	database
+		.prepare(
+			`INSERT INTO migration_messages (
+      migration_id, source_folder, source_uid, message_id, status, size_bytes, error, transferred_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(migration_id, source_folder, source_uid) DO UPDATE SET
+      status = excluded.status,
+      size_bytes = excluded.size_bytes,
+      message_id = excluded.message_id,
+      error = excluded.error,
+      transferred_at = excluded.transferred_at`,
+		)
+		.run(migrationId, folder, uid, messageId ?? null, status, sizeBytes, error ?? null);
 }
 
 export function markFolderCompleted(migrationId: string, sourcePath: string): void {
