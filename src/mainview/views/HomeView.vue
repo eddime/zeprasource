@@ -95,6 +95,16 @@ const headline = computed(() => {
 const progressLabel = computed(() => {
 	const p = progress.value;
 	if (!p) return "";
+	if (p.activityPhase === "retrying" || p.activityPhase === "reconnecting") {
+		return p.retryAfterMs
+			? `Retrying in ${Math.ceil(p.retryAfterMs / 1000)}s`
+			: "Retrying locally…";
+	}
+	if (p.activityPhase === "throttled") {
+		return p.retryAfterMs
+			? `Provider pause · ${Math.ceil(p.retryAfterMs / 1000)}s`
+			: "Provider is slowing us down";
+	}
 	if (p.messagesTotal > 0) {
 		return `${p.messagesCompleted} of ${p.messagesTotal} messages`;
 	}
@@ -106,6 +116,9 @@ const progressLabel = computed(() => {
 
 const subline = computed(() => {
 	const status = progress.value?.status;
+	if (progress.value?.activityLabel && (running.value || status === "running")) {
+		return progress.value.activityLabel;
+	}
 	if (resuming.value || isCatchingUp.value) {
 		return "Picking up where we left off…";
 	}

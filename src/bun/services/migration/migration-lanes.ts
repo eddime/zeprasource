@@ -15,7 +15,10 @@ import {
 	type FetchedMigrationMessage,
 } from "../imap/imap-client";
 import { MIGRATION_FETCH_BATCH_SIZE } from "./migration-constants";
-import { classifyMigrationError } from "./migration-errors";
+import {
+	classifyMigrationError,
+	type MigrationErrorClassification,
+} from "./migration-errors";
 import { computeRetryDelay } from "./retry-policy";
 
 export function shardUids(uids: number[], laneCount: number): number[][] {
@@ -47,6 +50,11 @@ export type FolderTransferHooks = {
 	waitWhilePaused: () => Promise<void>;
 	onMessageCompleted: (uid: number, sizeBytes: number) => void;
 	onMessageFailed: (uid: number) => void;
+	onRetry?: (
+		uid: number,
+		classification: MigrationErrorClassification,
+		retryAfterMs: number,
+	) => void;
 };
 
 type MarkMessageFn = (
@@ -264,7 +272,9 @@ async function processFetchedWithRetries(options: {
 				);
 				logger.error("migration", `Failed UID ${msg.uid} in ${mapping.sourcePath}`, errMsg);
 			} else {
-				await Bun.sleep(computeRetryDelay(attempt));
+				const retryAfterMs = computeRetryDelay(attempt);
+				hooks.onRetry?.(msg.uid, classification, retryAfterMs);
+				await Bun.sleep(retryAfterMs);
 			}
 		}
 	}

@@ -92,7 +92,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 		.query(
 			`SELECT id, source_email, dest_email, status, folders_total, folders_completed,
         messages_total, messages_completed, messages_failed, bytes_transferred,
-        created_at, completed_at, error
+        created_at, started_at, completed_at, error
        FROM migrations WHERE id = ?`,
 		)
 		.get(id) as {
@@ -107,6 +107,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 		messages_failed: number;
 		bytes_transferred: number;
 		created_at: string;
+		started_at: string | null;
 		completed_at: string | null;
 		error: string | null;
 	} | null;
@@ -125,6 +126,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 		messagesFailed: row.messages_failed,
 		bytesTransferred: row.bytes_transferred,
 		createdAt: row.created_at,
+		startedAt: row.started_at ?? undefined,
 		completedAt: row.completed_at ?? undefined,
 		error: row.error ?? undefined,
 	};
@@ -152,6 +154,7 @@ export function getMigrationProgressSnapshot(
 		messagesFailed: record.messagesFailed,
 		bytesTransferred: record.bytesTransferred,
 		error: record.error,
+		startedAt: record.startedAt,
 		updatedAt: new Date().toISOString(),
 		...extras,
 	};

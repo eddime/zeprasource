@@ -234,6 +234,8 @@ export async function executeMigration(
 
 			emitLiveProgress(emit, migrationId, live, {
 				currentFolder: mapping.sourcePath,
+				activityPhase: "scanning",
+				activityLabel: `Scanning ${mapping.sourcePath} locally…`,
 			});
 
 			await ensureFolderExists(destClient, mapping.destPath);
@@ -273,6 +275,12 @@ export async function executeMigration(
 				return existing.status !== "completed";
 			});
 
+			emitLiveProgress(emit, migrationId, live, {
+				currentFolder: mapping.sourcePath,
+				activityPhase: "transferring",
+				activityLabel: `Moving ${mapping.sourcePath} locally…`,
+			});
+
 			await transferFolderWithLanes({
 				db,
 				migrationId,
@@ -306,6 +314,20 @@ export async function executeMigration(
 					onMessageFailed: () => {
 						live.messagesFailed += 1;
 						incrementMigrationCounters(migrationId, { failed: 1 });
+					},
+					onRetry: (uid, classification, retryAfterMs) => {
+						const activityPhase = classification.reconnect
+							? "reconnecting"
+							: classification.kind === "throttled"
+								? "throttled"
+								: "retrying";
+						emitLiveProgress(emit, migrationId, live, {
+							currentFolder: mapping.sourcePath,
+							currentMessage: `UID ${uid}`,
+							activityPhase,
+							activityLabel: classification.userMessage,
+							retryAfterMs,
+						});
 					},
 				},
 			});

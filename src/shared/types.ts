@@ -39,6 +39,16 @@ export interface MigrationProgress {
 	migrationId: string;
 	status: MigrationStatus;
 	currentFolder?: string;
+	activityPhase?:
+		| "connecting"
+		| "scanning"
+		| "indexing"
+		| "transferring"
+		| "retrying"
+		| "throttled"
+		| "reconnecting";
+	activityLabel?: string;
+	retryAfterMs?: number;
 	foldersTotal: number;
 	foldersCompleted: number;
 	messagesTotal: number;
@@ -63,6 +73,7 @@ export interface MigrationRecord {
 	messagesFailed: number;
 	bytesTransferred: number;
 	createdAt: string;
+	startedAt?: string;
 	completedAt?: string;
 	error?: string;
 }

@@ -49,6 +49,7 @@ describe("migration-repository", () => {
 		});
 		expect(progress?.messagesTotal).toBe(150);
 		expect(progress?.messagesCompleted).toBe(0);
+		expect(progress?.startedAt).toBeDefined();
 	});
 
 	test("syncMigrationCounters restores completed message count after restart", () => {
