@@ -92,8 +92,8 @@ function loadFolderMappingsFromDb(migrationId: string): FolderMapping[] {
 		.all(migrationId) as Array<{ source_path: string; dest_path: string }>;
 
 	return folders.map((f) => ({
-		sourcePath: f.source_path,
-		destPath: f.dest_path,
+		sourcePath: decryptString(f.source_path) ?? f.source_path,
+		destPath: decryptString(f.dest_path) ?? f.dest_path,
 		selected: true,
 	}));
 }

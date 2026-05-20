@@ -50,6 +50,21 @@ describe("migration-repository", () => {
 		expect(progress?.messagesTotal).toBe(150);
 		expect(progress?.messagesCompleted).toBe(0);
 		expect(progress?.startedAt).toBeDefined();
+
+		const folderRow = db
+			.query(
+				`SELECT source_path, dest_path, source_path_hash
+         FROM migration_folders
+         WHERE migration_id = ? AND source_path_hash IS NOT NULL`,
+			)
+			.get(migrationId) as {
+			source_path: string;
+			dest_path: string;
+			source_path_hash: string;
+		} | null;
+		expect(folderRow?.source_path).not.toContain("INBOX");
+		expect(folderRow?.dest_path).not.toContain("INBOX");
+		expect(folderRow?.source_path_hash).toStartWith("hmac:v1:");
 	});
 
 	test("syncMigrationCounters restores completed message count after restart", () => {
@@ -128,24 +143,29 @@ describe("migration-repository", () => {
 			2,
 		);
 
-		const row = db
+		const rows = db
 			.query(
-				`SELECT status, size_bytes, message_id, error, retry_count
+				`SELECT source_folder, source_folder_hash, status, size_bytes, message_id, error, retry_count
          FROM migration_messages
-         WHERE migration_id = ? AND source_folder = 'INBOX' AND source_uid = 42`,
+         WHERE migration_id = ? AND source_uid = 42`,
 			)
-			.get(migrationId) as {
+			.all(migrationId) as Array<{
+			source_folder: string;
+			source_folder_hash: string | null;
 			status: string;
 			size_bytes: number;
 			message_id: string | null;
 			error: string | null;
 			retry_count: number;
-		};
+		}>;
 
-		expect(row).toEqual({
+		expect(rows).toHaveLength(1);
+		expect(rows[0]?.source_folder).not.toContain("INBOX");
+		expect(rows[0]?.source_folder_hash).toStartWith("hmac:v1:");
+		expect(rows[0]?.message_id).not.toContain("m@example.com");
+		expect(rows[0]).toMatchObject({
 			status: "completed",
 			size_bytes: 1234,
-			message_id: "<m@example.com>",
 			error: null,
 			retry_count: 2,
 		});

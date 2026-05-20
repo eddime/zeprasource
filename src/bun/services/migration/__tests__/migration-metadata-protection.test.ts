@@ -70,4 +70,42 @@ describe("migration metadata protection", () => {
 		const resume = loadMigrationResumePayload(migrationId);
 		expect(resume?.folderMappings[0]?.sourcePath).toBe("Private/Invoices");
 	});
+
+	test("stores folder rows encrypted while resume returns plaintext folder names", async () => {
+		const migrationId = await prepareMigrationStart({
+			source: mailbox("source@example.com"),
+			destination: mailbox("dest@example.com"),
+			folderMappings: [
+				{
+					sourcePath: "Private/Invoices",
+					destPath: "Imported/Invoices",
+					selected: true,
+					messages: 3,
+				},
+			],
+		});
+
+		const row = getDatabase()
+			.query(
+				`SELECT source_path, dest_path, source_path_hash
+         FROM migration_folders
+         WHERE migration_id = ?`,
+			)
+			.get(migrationId) as {
+			source_path: string;
+			dest_path: string;
+			source_path_hash: string | null;
+		};
+
+		expect(row.source_path).not.toContain("Private/Invoices");
+		expect(row.dest_path).not.toContain("Imported/Invoices");
+		expect(row.source_path_hash).toStartWith("hmac:v1:");
+
+		const resume = loadMigrationResumePayload(migrationId);
+		expect(resume?.folderMappings[0]).toMatchObject({
+			sourcePath: "Private/Invoices",
+			destPath: "Imported/Invoices",
+			selected: true,
+		});
+	});
 });

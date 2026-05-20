@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS migration_folders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   migration_id TEXT NOT NULL,
   source_path TEXT NOT NULL,
+  source_path_hash TEXT,
   dest_path TEXT NOT NULL,
   status TEXT NOT NULL DEFAULT 'pending',
   messages_total INTEGER NOT NULL DEFAULT 0,
@@ -65,6 +66,7 @@ CREATE TABLE IF NOT EXISTS migration_messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   migration_id TEXT NOT NULL,
   source_folder TEXT NOT NULL,
+  source_folder_hash TEXT,
   source_uid INTEGER NOT NULL,
   message_id TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
@@ -101,6 +103,7 @@ export function getDatabase(): Database {
 	db.exec("PRAGMA journal_mode = WAL;");
 	db.exec("PRAGMA foreign_keys = ON;");
 	db.exec(SCHEMA);
+	ensurePrivacyColumns(db);
 
 	const settingsRow = db
 		.query("SELECT value FROM settings WHERE key = 'app'")
@@ -110,6 +113,31 @@ export function getDatabase(): Database {
 	}
 
 	return db;
+}
+
+function hasColumn(database: Database, table: string, column: string): boolean {
+	const rows = database.query(`PRAGMA table_info(${table})`).all() as Array<{
+		name: string;
+	}>;
+	return rows.some((row) => row.name === column);
+}
+
+function ensurePrivacyColumns(database: Database): void {
+	if (!hasColumn(database, "migration_folders", "source_path_hash")) {
+		database.exec("ALTER TABLE migration_folders ADD COLUMN source_path_hash TEXT");
+	}
+	if (!hasColumn(database, "migration_messages", "source_folder_hash")) {
+		database.exec("ALTER TABLE migration_messages ADD COLUMN source_folder_hash TEXT");
+	}
+	database.exec("DROP INDEX IF EXISTS idx_migration_messages_folder_hash_uid;");
+	database.exec(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_migration_messages_folder_hash_uid
+     ON migration_messages(migration_id, source_folder_hash, source_uid);`,
+	);
+	database.exec(
+		`CREATE INDEX IF NOT EXISTS idx_migration_folders_source_path_hash
+     ON migration_folders(migration_id, source_path_hash);`,
+	);
 }
 
 export function getDataDirectory(): string {

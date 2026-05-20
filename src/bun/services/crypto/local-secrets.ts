@@ -1,9 +1,16 @@
-import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from "node:crypto";
+import {
+	createCipheriv,
+	createDecipheriv,
+	createHmac,
+	randomBytes,
+	scryptSync,
+} from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { getDataDirectory } from "../../db/database";
 
 const PREFIX = "enc:v1:";
+const HMAC_PREFIX = "hmac:v1:";
 const ALGORITHM = "aes-256-gcm";
 const KEY_LENGTH = 32;
 
@@ -61,4 +68,13 @@ export function decryptString(value: string | null | undefined): string | null {
 		decipher.final(),
 	]);
 	return decrypted.toString("utf8");
+}
+
+export function hashString(scope: string, value: string): string {
+	const digest = createHmac("sha256", getKey())
+		.update(scope)
+		.update("\0")
+		.update(value)
+		.digest("hex");
+	return `${HMAC_PREFIX}${digest}`;
 }

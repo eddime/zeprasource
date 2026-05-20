@@ -6,7 +6,11 @@ import type {
 } from "../../shared/types";
 import type { Database } from "bun:sqlite";
 import { getDatabase } from "./database";
-import { decryptString } from "../services/crypto/local-secrets";
+import {
+	decryptString,
+	encryptString,
+	hashString,
+} from "../services/crypto/local-secrets";
 
 export function resetDatabaseSingleton(): void {
 	// Test hook: force next getDatabase() to open a fresh file (see database.ts).
@@ -168,15 +172,22 @@ export function seedMigrationFolderTotals(
 ): number {
 	const database = getDatabase();
 	const insertFolder = database.prepare(
-		`INSERT INTO migration_folders (migration_id, source_path, dest_path, status, messages_total)
-     VALUES (?, ?, ?, 'pending', ?)`,
+		`INSERT INTO migration_folders (
+       migration_id, source_path, source_path_hash, dest_path, status, messages_total
+     ) VALUES (?, ?, ?, ?, 'pending', ?)`,
 	);
 
 	let estimatedTotal = 0;
 	for (const mapping of mappings) {
 		const estimate = mapping.messages ?? 0;
 		estimatedTotal += estimate;
-		insertFolder.run(migrationId, mapping.sourcePath, mapping.destPath, estimate);
+		insertFolder.run(
+			migrationId,
+			encryptString(mapping.sourcePath),
+			hashString(`migration-folder:${migrationId}`, mapping.sourcePath),
+			encryptString(mapping.destPath),
+			estimate,
+		);
 	}
 
 	database
@@ -198,16 +209,27 @@ export function updateFolderScannedTotal(
 	const row = database
 		.query(
 			`SELECT messages_total FROM migration_folders
-       WHERE migration_id = ? AND source_path = ?`,
+       WHERE migration_id = ? AND (source_path_hash = ? OR source_path = ?)`,
 		)
-		.get(migrationId, sourcePath) as { messages_total: number } | null;
+		.get(
+			migrationId,
+			hashString(`migration-folder:${migrationId}`, sourcePath),
+			sourcePath,
+		) as { messages_total: number } | null;
 
 	const nextTotal = Math.max(row?.messages_total ?? 0, scannedCount);
 	database
 		.prepare(
-			`UPDATE migration_folders SET messages_total = ? WHERE migration_id = ? AND source_path = ?`,
+			`UPDATE migration_folders
+       SET messages_total = ?
+       WHERE migration_id = ? AND (source_path_hash = ? OR source_path = ?)`,
 		)
-		.run(nextTotal, migrationId, sourcePath);
+		.run(
+			nextTotal,
+			migrationId,
+			hashString(`migration-folder:${migrationId}`, sourcePath),
+			sourcePath,
+		);
 
 	return refreshMigrationMessagesTotal(migrationId);
 }
@@ -277,9 +299,9 @@ export function markMigrationMessage(
 	database
 		.prepare(
 			`INSERT INTO migration_messages (
-      migration_id, source_folder, source_uid, message_id, status, size_bytes, error, retry_count, transferred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-    ON CONFLICT(migration_id, source_folder, source_uid) DO UPDATE SET
+      migration_id, source_folder, source_folder_hash, source_uid, message_id, status, size_bytes, error, retry_count, transferred_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    ON CONFLICT(migration_id, source_folder_hash, source_uid) DO UPDATE SET
       status = excluded.status,
       size_bytes = excluded.size_bytes,
       message_id = excluded.message_id,
@@ -289,12 +311,13 @@ export function markMigrationMessage(
 		)
 		.run(
 			migrationId,
-			folder,
+			encryptString(folder),
+			hashString(`migration-message-folder:${migrationId}`, folder),
 			uid,
-			messageId ?? null,
+			encryptString(messageId ?? null),
 			status,
 			sizeBytes,
-			error ?? null,
+			encryptString(error ?? null),
 			retryCount,
 		);
 }
@@ -304,9 +327,13 @@ export function markFolderCompleted(migrationId: string, sourcePath: string): vo
 	database
 		.prepare(
 			`UPDATE migration_folders SET status = 'completed', messages_completed = messages_total
-       WHERE migration_id = ? AND source_path = ?`,
+       WHERE migration_id = ? AND (source_path_hash = ? OR source_path = ?)`,
 		)
-		.run(migrationId, sourcePath);
+		.run(
+			migrationId,
+			hashString(`migration-folder:${migrationId}`, sourcePath),
+			sourcePath,
+		);
 }
 
 export function setMigrationStatus(

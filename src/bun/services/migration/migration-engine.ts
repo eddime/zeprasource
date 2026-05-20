@@ -6,7 +6,7 @@ import type {
 	MigrationStatus,
 } from "../../../shared/types";
 import { getDatabase, loadSettings } from "../../db/database";
-import { encryptString } from "../crypto/local-secrets";
+import { encryptString, hashString } from "../crypto/local-secrets";
 import {
 	getMigrationProgressSnapshot,
 	incrementMigrationCounters,
@@ -243,9 +243,14 @@ export async function executeMigration(
 
 			const folderRow = db
 				.query(
-					"SELECT status FROM migration_folders WHERE migration_id = ? AND source_path = ?",
+					`SELECT status FROM migration_folders
+           WHERE migration_id = ? AND (source_path_hash = ? OR source_path = ?)`,
 				)
-				.get(migrationId, mapping.sourcePath) as { status: string } | null;
+				.get(
+					migrationId,
+					hashString(`migration-folder:${migrationId}`, mapping.sourcePath),
+					mapping.sourcePath,
+				) as { status: string } | null;
 
 			if (folderRow?.status === "completed") {
 				emitLiveProgress(emit, migrationId, live, {
@@ -255,8 +260,14 @@ export async function executeMigration(
 			}
 
 			db.prepare(
-				`UPDATE migration_folders SET status = 'running' WHERE migration_id = ? AND source_path = ?`,
-			).run(migrationId, mapping.sourcePath);
+				`UPDATE migration_folders
+         SET status = 'running'
+         WHERE migration_id = ? AND (source_path_hash = ? OR source_path = ?)`,
+			).run(
+				migrationId,
+				hashString(`migration-folder:${migrationId}`, mapping.sourcePath),
+				mapping.sourcePath,
+			);
 
 			const uids = await fetchFolderUids(sourceClient, mapping.sourcePath);
 			live.messagesTotal = updateFolderScannedTotal(
@@ -269,9 +280,16 @@ export async function executeMigration(
 				const existing = db
 					.query(
 						`SELECT status FROM migration_messages
-             WHERE migration_id = ? AND source_folder = ? AND source_uid = ?`,
+             WHERE migration_id = ?
+               AND (source_folder_hash = ? OR source_folder = ?)
+               AND source_uid = ?`,
 					)
-					.get(migrationId, mapping.sourcePath, uid) as { status: string } | null;
+					.get(
+						migrationId,
+						hashString(`migration-message-folder:${migrationId}`, mapping.sourcePath),
+						mapping.sourcePath,
+						uid,
+					) as { status: string } | null;
 				if (!existing) return true;
 				return existing.status !== "completed";
 			});
