@@ -6,6 +6,7 @@ import type {
 	MigrationCheckoutCreateBody,
 	PaidMigrationTierId,
 } from "../shared/stripe-checkout";
+import { MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES } from "../shared/stripe-checkout";
 import {
 	createStripeClient,
 	isStripeConfigured,
@@ -83,6 +84,7 @@ export async function createCheckoutSession(
 
 	const session = await stripe.checkout.sessions.create({
 		mode: "payment",
+		payment_method_types: [...MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES],
 		line_items: [{ price: priceId, quantity: 1 }],
 		success_url: `${base}/success?session_id={CHECKOUT_SESSION_ID}`,
 		cancel_url: `${base}/cancel?session_id={CHECKOUT_SESSION_ID}`,

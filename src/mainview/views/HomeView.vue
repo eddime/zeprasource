@@ -71,7 +71,8 @@ const usesDock = computed(
 	() =>
 		step.value === "welcome" ||
 		step.value === "setup" ||
-		step.value === "folders",
+		step.value === "folders" ||
+		step.value === "pricing",
 );
 
 const isMigrationPaused = computed(
@@ -294,6 +295,55 @@ function backFromPricing() {
 	sizeEstimate.value = null;
 }
 
+/** Dev shortcut from welcome — opens pricing with a mock paid estimate. */
+function goToPaymentTest() {
+	pricingPaymentError.value = null;
+	estimateError.value = null;
+	sizeEstimate.value = {
+		totalBytes: 12 * 1024 ** 3,
+		messageCount: 8_420,
+		folders: [
+			{ path: "INBOX", messages: 4_200, bytes: 6 * 1024 ** 3 },
+			{ path: "Sent", messages: 2_100, bytes: 4 * 1024 ** 3 },
+			{ path: "Archive", messages: 2_120, bytes: 2 * 1024 ** 3 },
+		],
+		requiresPayment: true,
+		freeLimitBytes: 2 * 1024 ** 3,
+		durationLabel: "~2 hours",
+		durationRangeLabel: "about 1–3 hours",
+		secondsTypical: 7_200,
+	};
+	if (folderMappings.value.filter((f) => f.selected).length === 0) {
+		folderMappings.value = [
+			{
+				sourcePath: "INBOX",
+				destPath: "INBOX",
+				selected: true,
+				messages: 4_200,
+				bytes: 6 * 1024 ** 3,
+			},
+			{
+				sourcePath: "Sent",
+				destPath: "Sent",
+				selected: true,
+				messages: 2_100,
+				bytes: 4 * 1024 ** 3,
+			},
+			{
+				sourcePath: "Archive",
+				destPath: "Archive",
+				selected: true,
+				messages: 2_120,
+				bytes: 2 * 1024 ** 3,
+			},
+		];
+	}
+	step.value = "pricing";
+	void pricing.ensureLoaded(true).then(() => {
+		stripeConfigured.value = pricing.stripeLive;
+	});
+}
+
 watch(step, async (current) => {
 	if (current !== "pricing") return;
 	pricingPaymentError.value = null;
@@ -332,9 +382,10 @@ async function confirmPricingAndMigrate() {
 
 		const opened = await getRpc().request.openMigrationCheckout({
 			checkoutUrl: checkout.checkoutUrl,
+			sessionId: checkout.sessionId,
 		});
 		if (!opened.opened) {
-			throw new Error("Could not open the browser for Stripe Checkout.");
+			throw new Error("Could not open your browser for Stripe checkout.");
 		}
 
 		const payment = await getRpc().request.waitForMigrationCheckout({
@@ -406,6 +457,7 @@ async function startAnotherMigration() {
 					class="step-view"
 					@start="goToSetup"
 					@select-session="openSession"
+					@test-payment="goToPaymentTest"
 				/>
 
 				<MigrationPricingStep

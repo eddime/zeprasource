@@ -24,7 +24,7 @@ export const FALLBACK_MIGRATION_PRICE_LABELS: MigrationPriceLabels = {
 	free: "€0",
 	starter: "€9",
 	plus: "€14",
-	pro: "€32",
+	pro: "€29",
 };
 
 const PLANS: Array<Omit<MigrationPricingPlan, "priceLabel">> = [

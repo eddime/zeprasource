@@ -160,7 +160,7 @@ export type MailPortRPC = {
 				response: MigrationCheckoutCreateResult;
 			};
 			openMigrationCheckout: {
-				params: { checkoutUrl: string };
+				params: { checkoutUrl: string; sessionId: string };
 				response: { opened: boolean };
 			};
 			waitForMigrationCheckout: {

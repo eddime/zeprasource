@@ -7,6 +7,12 @@ export const STRIPE_MIGRATION_LOOKUP_KEYS = {
 
 export type PaidMigrationTierId = keyof typeof STRIPE_MIGRATION_LOOKUP_KEYS;
 
+/**
+ * Migration checkout only — instant one-time payment (no SEPA direct debit).
+ * Add "paypal" after enabling it in Stripe Dashboard → Payment methods.
+ */
+export const MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES = ["card"] as const;
+
 export type MigrationCheckoutCreateParams = {
 	tierId: PaidMigrationTierId;
 	totalBytes: number;

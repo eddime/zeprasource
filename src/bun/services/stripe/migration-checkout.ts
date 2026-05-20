@@ -1,9 +1,10 @@
 import Stripe from "stripe";
-import type {
-	MigrationCheckoutCreateParams,
-	MigrationCheckoutCreateResult,
-	MigrationCheckoutWaitResult,
-	PaidMigrationTierId,
+import {
+	MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES,
+	type MigrationCheckoutCreateParams,
+	type MigrationCheckoutCreateResult,
+	type MigrationCheckoutWaitResult,
+	type PaidMigrationTierId,
 } from "../../../shared/stripe-checkout";
 import { hashFolderSelection } from "../../../shared/migration-payment";
 import { getPricingTier } from "../../../shared/pricing";
@@ -84,6 +85,7 @@ export async function createMigrationCheckout(
 
 	const session = await stripe.checkout.sessions.create({
 		mode: "payment",
+		payment_method_types: [...MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES],
 		line_items: [{ price: priceId, quantity: 1 }],
 		success_url: `${base}/success?session_id={CHECKOUT_SESSION_ID}`,
 		cancel_url: `${base}/cancel?session_id={CHECKOUT_SESSION_ID}`,
@@ -207,6 +209,6 @@ export async function waitForMigrationCheckout(
 
 	return {
 		paid: false,
-		error: "Payment timed out. Finish checkout in the browser or try again.",
+		error: "Payment timed out. Finish checkout in your browser or try again.",
 	};
 }

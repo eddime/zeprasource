@@ -9,7 +9,13 @@ import SessionRail from "../sessions/SessionRail.vue";
 import PerkIcon, { type PerkIconKind } from "./PerkIcon.vue";
 import { useMigrationStore } from "../../stores/migration";
 
-const emit = defineEmits<{ start: []; "select-session": [id: string] }>();
+const emit = defineEmits<{
+	start: [];
+	"select-session": [id: string];
+	"test-payment": [];
+}>();
+
+const isDev = import.meta.env.DEV;
 
 const migration = useMigrationStore();
 const { activeSessions, pastSessions, hasSessionCards, sessionsHydrated } =
@@ -38,6 +44,14 @@ const perks: Array<{ icon: PerkIconKind; title: string; text: string }> = [
 <template>
 	<div class="welcome" :class="{ 'welcome--has-sessions': showSessionRails }">
 		<header class="welcome-top">
+			<button
+				v-if="isDev"
+				type="button"
+				class="pricing-link test-payment-link"
+				@click="emit('test-payment')"
+			>
+				Test payment
+			</button>
 			<button type="button" class="pricing-link" @click="pricingOpen = true">Pricing</button>
 		</header>
 		<PricingSheet v-model:open="pricingOpen" />
@@ -100,8 +114,21 @@ const perks: Array<{ icon: PerkIconKind; title: string; text: string }> = [
 	top: 0;
 	right: 0;
 	z-index: 2;
+	display: flex;
+	align-items: center;
+	gap: 0.15rem;
 	padding: 1rem var(--site-padding-x, 1.25rem);
 	pointer-events: none;
+}
+
+.test-payment-link {
+	color: color-mix(in srgb, #b45309 75%, var(--muted));
+	font-weight: 600;
+}
+
+.test-payment-link:hover {
+	color: #b45309;
+	background: color-mix(in srgb, #b45309 8%, transparent);
 }
 
 .pricing-link {
