@@ -1,8 +1,6 @@
 import { BrowserView, Utils, type RPCSchema } from "electrobun/bun";
-import { randomUUID } from "node:crypto";
 import type { MailPortRPC } from "./schema";
 import {
-	getDatabase,
 	getDatabasePath,
 	listMigrations,
 	loadSettings,
@@ -13,9 +11,9 @@ import {
 	getMigrationProgressSnapshot,
 } from "../db/migration-repository";
 import {
-	createCredentialRef,
-	credentialStore,
-} from "../services/credentials/credential-store";
+	loadMailboxProfileForDisplay,
+	saveMailboxProfile,
+} from "../services/imap/mailbox-profile";
 import { discoverImapSettings as lookupImapSettings } from "../services/imap/imap-autodiscover";
 import { checkDestinationQuota } from "../services/imap/destination-quota";
 import {
@@ -41,42 +39,7 @@ import {
 	pauseMigration,
 	type ProgressEmitter,
 } from "../services/migration/migration-engine";
-import type { MailboxCredentials, MigrationProgress } from "../../shared/types";
-
-type StoredProfile = {
-	id: string;
-	role: string;
-	provider: string;
-	email: string;
-	host: string;
-	port: number;
-	secure: number;
-	auth_method: string;
-	username: string | null;
-	credential_ref: string;
-};
-
-function persistSecret(credentials: MailboxCredentials): string {
-	const ref = createCredentialRef(credentials.email);
-	credentialStore.store(ref, credentials.password ?? "");
-	return ref;
-}
-
-function loadCredentialsFromProfile(row: StoredProfile): MailboxCredentials | null {
-	const secret = credentialStore.retrieve(row.credential_ref);
-	if (secret === null) return null;
-
-	return {
-		provider: row.provider as MailboxCredentials["provider"],
-		email: row.email,
-		host: row.host,
-		port: row.port,
-		secure: Boolean(row.secure),
-		authMethod: "password",
-		username: row.username ?? undefined,
-		password: secret,
-	};
-}
+import type { MigrationProgress } from "../../shared/types";
 
 let progressEmitter: ProgressEmitter | null = null;
 let mainWindowRpc: ReturnType<typeof BrowserView.defineRPC<MailPortRPC>> | null = null;
@@ -111,50 +74,10 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 			},
 
 			saveMailboxProfile: ({ role, credentials }) => {
-				const db = getDatabase();
-				const credentialRef = persistSecret(credentials);
-				const profileId = randomUUID();
-
-				const existing = db
-					.query("SELECT credential_ref FROM mailbox_profiles WHERE role = ?")
-					.all(role) as Array<{ credential_ref: string }>;
-				for (const row of existing) {
-					credentialStore.delete(row.credential_ref);
-				}
-				db.prepare("DELETE FROM mailbox_profiles WHERE role = ?").run(role);
-
-				db.prepare(
-					`INSERT INTO mailbox_profiles (
-            id, role, provider, email, host, port, secure, auth_method, username, credential_ref, updated_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
-				).run(
-					profileId,
-					role,
-					credentials.provider,
-					credentials.email,
-					credentials.host,
-					credentials.port,
-					credentials.secure ? 1 : 0,
-					credentials.authMethod,
-					credentials.username ?? null,
-					credentialRef,
-				);
-
-				return { profileId };
+				return saveMailboxProfile(role, credentials);
 			},
 
-			getMailboxProfile: ({ role }) => {
-				const db = getDatabase();
-				const row = db
-					.query(
-						`SELECT * FROM mailbox_profiles WHERE role = ? ORDER BY updated_at DESC LIMIT 1`,
-					)
-					.get(role) as StoredProfile | null;
-				if (!row) return null;
-				const creds = loadCredentialsFromProfile(row);
-				if (!creds) return null;
-				return { ...creds, password: undefined };
-			},
+			getMailboxProfile: ({ role }) => loadMailboxProfileForDisplay(role),
 
 			estimateMigrationSize: async ({ source, folderPaths }) => {
 				return computeMigrationSize(source, folderPaths);

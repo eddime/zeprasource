@@ -2,20 +2,8 @@ import type { FolderMapping, MailboxCredentials } from "../../../shared/types";
 import { getDatabase } from "../../db/database";
 import { syncMigrationCounters } from "../../db/migration-repository";
 import { credentialStore } from "../credentials/credential-store";
+import { loadMailboxCredentialsByRole } from "../imap/mailbox-profile";
 import { logger } from "../../utils/logger";
-
-type StoredProfile = {
-	id: string;
-	role: string;
-	provider: string;
-	email: string;
-	host: string;
-	port: number;
-	secure: number;
-	auth_method: string;
-	username: string | null;
-	credential_ref: string;
-};
 
 function migrationCredentialRef(migrationId: string, side: "source" | "destination"): string {
 	return `migration/${migrationId}/${side}`;
@@ -42,30 +30,6 @@ function deserializeMailbox(raw: string): MailboxCredentials | null {
 	} catch {
 		return null;
 	}
-}
-
-function loadProfileByRole(role: "source" | "destination"): MailboxCredentials | null {
-	const db = getDatabase();
-	const row = db
-		.query(
-			`SELECT * FROM mailbox_profiles WHERE role = ? ORDER BY updated_at DESC LIMIT 1`,
-		)
-		.get(role) as StoredProfile | null;
-	if (!row) return null;
-
-	const secret = credentialStore.retrieve(row.credential_ref);
-	if (secret === null) return null;
-
-	return {
-		provider: row.provider as MailboxCredentials["provider"],
-		email: row.email,
-		host: row.host,
-		port: row.port,
-		secure: Boolean(row.secure),
-		authMethod: row.auth_method as MailboxCredentials["authMethod"],
-		username: row.username ?? undefined,
-		password: secret,
-	};
 }
 
 export function snapshotMigrationMailboxes(
@@ -160,8 +124,8 @@ export function loadMigrationResumePayload(
 	let source = loadMailboxFromSnapshot(migrationId, "source");
 	let destination = loadMailboxFromSnapshot(migrationId, "destination");
 
-	if (!source) source = loadProfileByRole("source");
-	if (!destination) destination = loadProfileByRole("destination");
+	if (!source) source = loadMailboxCredentialsByRole("source");
+	if (!destination) destination = loadMailboxCredentialsByRole("destination");
 
 	if (!source || !destination) {
 		logger.error(
