@@ -6,6 +6,7 @@ import type {
 	MigrationStatus,
 } from "../../../shared/types";
 import { getDatabase, loadSettings } from "../../db/database";
+import { encryptString } from "../crypto/local-secrets";
 import {
 	getMigrationProgressSnapshot,
 	incrementMigrationCounters,
@@ -150,10 +151,10 @@ export async function prepareMigrationStart(
 			migrationId,
 			sourceRef,
 			destRef,
-			source.email,
-			destination.email,
+			encryptString(source.email),
+			encryptString(destination.email),
 			selectedMappings.length,
-			JSON.stringify(selectedMappings),
+			encryptString(JSON.stringify(selectedMappings)),
 		);
 
 		snapshotMigrationMailboxes(migrationId, source, destination);

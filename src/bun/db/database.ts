@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { Utils } from "electrobun/bun";
 import type { AppSettings, MigrationRecord, MigrationStatus } from "../../shared/types";
 import { DEFAULT_SETTINGS } from "../../shared/types";
+import { decryptString } from "../services/crypto/local-secrets";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS settings (
@@ -168,8 +169,8 @@ export function listMigrations(limit = 50): MigrationRecord[] {
 
 	return rows.map((row) => ({
 		id: row.id,
-		sourceEmail: row.source_email,
-		destEmail: row.dest_email,
+		sourceEmail: decryptString(row.source_email) ?? row.source_email,
+		destEmail: decryptString(row.dest_email) ?? row.dest_email,
 		status: row.status,
 		foldersTotal: row.folders_total,
 		foldersCompleted: row.folders_completed,

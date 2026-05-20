@@ -2,6 +2,7 @@ import type { FolderMapping, MailboxCredentials } from "../../../shared/types";
 import { getDatabase } from "../../db/database";
 import { syncMigrationCounters } from "../../db/migration-repository";
 import { credentialStore } from "../credentials/credential-store";
+import { decryptString } from "../crypto/local-secrets";
 import { loadMailboxCredentialsByRole } from "../imap/mailbox-profile";
 import { logger } from "../../utils/logger";
 
@@ -74,7 +75,8 @@ function loadFolderMappingsFromDb(migrationId: string): FolderMapping[] {
 
 	if (row?.folder_mappings) {
 		try {
-			const parsed = JSON.parse(row.folder_mappings) as FolderMapping[];
+			const raw = decryptString(row.folder_mappings) ?? row.folder_mappings;
+			const parsed = JSON.parse(raw) as FolderMapping[];
 			if (Array.isArray(parsed) && parsed.length > 0) {
 				return parsed.filter((m) => m.selected !== false);
 			}

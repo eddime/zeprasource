@@ -6,6 +6,7 @@ import type {
 } from "../../shared/types";
 import type { Database } from "bun:sqlite";
 import { getDatabase } from "./database";
+import { decryptString } from "../services/crypto/local-secrets";
 
 export function resetDatabaseSingleton(): void {
 	// Test hook: force next getDatabase() to open a fresh file (see database.ts).
@@ -116,8 +117,8 @@ export function getMigrationById(id: string): MigrationRecord | null {
 
 	return {
 		id: row.id,
-		sourceEmail: row.source_email,
-		destEmail: row.dest_email,
+		sourceEmail: decryptString(row.source_email) ?? row.source_email,
+		destEmail: decryptString(row.dest_email) ?? row.dest_email,
 		status: row.status,
 		foldersTotal: row.folders_total,
 		foldersCompleted: row.folders_completed,
