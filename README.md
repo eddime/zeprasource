@@ -9,7 +9,7 @@ MailPort transfers email **directly between IMAP servers on your machine**. No c
 - [Electrobun](https://electrobun.dev) — native desktop shell (Bun runtime)
 - Vue 3 + TypeScript + Vite
 - Tailwind CSS v4
-- Vue Router + Pinia
+- Pinia
 - SQLite (`bun:sqlite`) for migration state & history
 - [ImapFlow](https://imapflow.com) for IMAP
 

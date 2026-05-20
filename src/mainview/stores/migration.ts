@@ -1,6 +1,10 @@
 import { defineStore } from "pinia";
 import { computed, ref, shallowRef } from "vue";
-import { recordToProgress, splitSessionLists } from "../../shared/migration-sessions";
+import {
+	migrationPercent,
+	recordToProgress,
+	splitSessionLists,
+} from "../../shared/migration-sessions";
 import type { MigrationProgress, MigrationRecord } from "../../shared/types";
 import { getRpc, electroview } from "../lib/electrobun";
 import { useMailboxesStore } from "./mailboxes";
@@ -52,24 +56,9 @@ export const useMigrationStore = defineStore("migration", () => {
 		);
 	});
 
-	const overallPercent = computed(() => {
-		const p = focusedProgress.value;
-		if (!p) return 0;
-		if (p.messagesTotal > 0) {
-			return Math.min(
-				100,
-				Math.round((p.messagesCompleted / p.messagesTotal) * 100),
-			);
-		}
-		if (p.foldersTotal > 0) {
-			return Math.min(
-				100,
-				Math.round((p.foldersCompleted / p.foldersTotal) * 100),
-			);
-		}
-		if (p.messagesCompleted > 0) return 1;
-		return 0;
-	});
+	const overallPercent = computed(() =>
+		migrationPercent(focusedProgress.value ?? undefined),
+	);
 
 	function setProgress(snapshot: MigrationProgress) {
 		const next = new Map(progressById.value);

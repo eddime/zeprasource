@@ -42,7 +42,7 @@ const {
 	folderStatsError,
 } = storeToRefs(mailboxes);
 
-const { progress, overallPercent, running, resuming, isLiveMigration, activeId } =
+const { progress, overallPercent, running, resuming, isLiveMigration } =
 	storeToRefs(migration);
 
 const bothConnected = computed(
