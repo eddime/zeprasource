@@ -1,6 +1,7 @@
 import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
-import type { MailboxCredentials } from "../../../shared/types";
+import type { ImapFlow } from "imapflow";
+import type { ImapFolder, MailboxCredentials } from "../../../shared/types";
 import { createImapClient, safeCloseImapClient } from "./imap-client";
 
 export type ImapLoginProbeResult = "ok" | "auth-failed" | "network";
@@ -82,13 +83,34 @@ function isAuthFailure(error: unknown): boolean {
 	);
 }
 
+async function listImapFoldersAfterConnect(client: ImapFlow): Promise<ImapFolder[]> {
+	const boxes = await client.list();
+	return boxes
+		.filter((box) => !box.flags?.has("\\Noselect"))
+		.map((box) => ({
+			path: box.path,
+			name: box.name,
+			delimiter: box.delimiter,
+			attributes: Array.from(box.flags ?? []),
+		}));
+}
+
 /** Login probe — auth failure still means we found the right server. */
 export async function probeImapLogin(
 	credentials: MailboxCredentials,
 ): Promise<ImapLoginProbeResult> {
+	const result = await probeImapLoginDetailed(credentials);
+	return result.result;
+}
+
+/** Login probe; on success optionally lists folders (one round-trip for connect). */
+export async function probeImapLoginDetailed(
+	credentials: MailboxCredentials,
+	options?: { listFolders?: boolean },
+): Promise<{ result: ImapLoginProbeResult; folders?: ImapFolder[] }> {
 	const user = credentials.username?.trim() || credentials.email.trim();
 	const pass = credentials.password ?? "";
-	if (!user || !pass) return "network";
+	if (!user || !pass) return { result: "network" };
 
 	const client = await createImapClient(
 		{ ...credentials, email: user, password: pass, authMethod: "password" },
@@ -97,11 +119,14 @@ export async function probeImapLogin(
 
 	try {
 		await client.connect();
+		const folders = options?.listFolders
+			? await listImapFoldersAfterConnect(client)
+			: undefined;
 		await client.logout();
-		return "ok";
+		return { result: "ok", folders };
 	} catch (error) {
-		if (isAuthFailure(error)) return "auth-failed";
-		return "network";
+		if (isAuthFailure(error)) return { result: "auth-failed" };
+		return { result: "network" };
 	} finally {
 		await safeCloseImapClient(client);
 	}

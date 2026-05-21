@@ -48,9 +48,28 @@ export async function connectMailbox(
 	password: string,
 ): Promise<ConnectMailboxResult> {
 	const trimmedEmail = email.trim();
+	const trimmedPassword = password.trim();
 	const discovered = await discoverMailboxSettings(trimmedEmail, {
-		password: password.trim(),
+		password: trimmedPassword,
+		collectFolders: true,
 	});
+	const settings = {
+		host: discovered.host,
+		port: discovered.port,
+		secure: discovered.secure,
+		provider: discovered.provider,
+		accessProtocol: discovered.accessProtocol,
+		source: discovered.source,
+	};
+
+	if (discovered.folders) {
+		return {
+			success: true,
+			folders: discovered.folders,
+			...settings,
+		};
+	}
+
 	const credentials: MailboxCredentials = {
 		provider: discovered.provider,
 		email: trimmedEmail,
@@ -58,18 +77,13 @@ export async function connectMailbox(
 		port: discovered.port,
 		secure: discovered.secure,
 		authMethod: "password",
-		password: password.trim(),
+		password: trimmedPassword,
 		accessProtocol: discovered.accessProtocol,
 	};
 	const connection = await testMailConnection(credentials);
 	return {
 		...connection,
-		host: discovered.host,
-		port: discovered.port,
-		secure: discovered.secure,
-		provider: discovered.provider,
-		accessProtocol: discovered.accessProtocol,
-		source: discovered.source,
+		...settings,
 	};
 }
 

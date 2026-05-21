@@ -1,5 +1,5 @@
 import { defineStore } from "pinia";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import type {
 	FolderMapping,
 	ImapFolder,
@@ -126,13 +126,15 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 					}
 					if (isSource) {
 						sourceFolders.value = connected.folders ?? [];
-						sourceValidated.value = true;
 					} else {
 						destFolders.value = connected.folders ?? [];
-						destValidated.value = true;
 					}
 					buildFolderMappings();
 					await rpc.request.saveMailboxProfile({ role: target, credentials: creds });
+					// Validated after credentials are on the model (avoids MailboxCard treating discovery as user edit).
+					await nextTick();
+					if (isSource) sourceValidated.value = true;
+					else destValidated.value = true;
 					return true;
 				} catch (error) {
 					const msg =
@@ -165,13 +167,14 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 			}
 			if (isSource) {
 				sourceFolders.value = result.folders ?? [];
-				sourceValidated.value = true;
 			} else {
 				destFolders.value = result.folders ?? [];
-				destValidated.value = true;
 			}
 			buildFolderMappings();
 			await rpc.request.saveMailboxProfile({ role: target, credentials: creds });
+			await nextTick();
+			if (isSource) sourceValidated.value = true;
+			else destValidated.value = true;
 			return true;
 		} catch (error) {
 			const msg =

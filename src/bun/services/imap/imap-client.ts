@@ -22,7 +22,7 @@ const IMAP_TIMEOUTS: Record<
 	ImapClientMode,
 	{ connectionTimeout: number; greetingTimeout: number; socketTimeout: number }
 > = {
-	probe: { connectionTimeout: 8_000, greetingTimeout: 8_000, socketTimeout: 12_000 },
+	probe: { connectionTimeout: 5_000, greetingTimeout: 5_000, socketTimeout: 8_000 },
 	test: { connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 20_000 },
 	migration: { connectionTimeout: 30_000, greetingTimeout: 20_000, socketTimeout: 120_000 },
 };

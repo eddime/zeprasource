@@ -52,6 +52,8 @@ export function createStreamingRace<T>(options: StreamingRaceOptions<T>): {
 		if (settled) return;
 		if (result === "ok") {
 			okWinner = candidate;
+			pending.length = 0;
+			streamClosed = true;
 			tryFinish();
 			return;
 		}
@@ -75,7 +77,7 @@ export function createStreamingRace<T>(options: StreamingRaceOptions<T>): {
 
 	return {
 		enqueue(candidate: T) {
-			if (settled || okWinner) return;
+			if (settled || okWinner || streamClosed) return;
 			const key = candidateKey(candidate);
 			if (seen.has(key)) return;
 			seen.add(key);

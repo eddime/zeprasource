@@ -1,18 +1,22 @@
 import { promises as dns } from "node:dns";
 import { emailDomain } from "../../../shared/mailbox-provider";
 import type { MailAccessProtocol } from "../../../shared/mail-access";
-import type { MailboxProvider } from "../../../shared/types";
+import type { ImapFolder, MailboxProvider } from "../../../shared/types";
 import { createStreamingRace } from "./discovery-race";
-import { probeImapBanner, probeImapLogin } from "./imap-probe";
+import { probeImapBanner, probeImapLoginDetailed } from "./imap-probe";
 import { probePop3Banner, probePop3Login } from "../pop/pop-probe";
 
 export { detectProviderFromEmail } from "../../../shared/mailbox-provider";
 
 /** Discovery — short timeouts; wrong hosts fail fast. */
-const AUTOCONFIG_FETCH_MS = 2_000;
-const DISCOVERY_BUDGET_MS = 10_000;
-const DISCOVERY_PROBE_CONCURRENCY = 5;
-const DISCOVERY_BANNER_PROBE_MS = 2_500;
+const AUTOCONFIG_FETCH_MS = 1_500;
+const DISCOVERY_BUDGET_MS = 8_000;
+const DISCOVERY_PROBE_CONCURRENCY = 6;
+const DISCOVERY_BANNER_PROBE_MS = 2_000;
+/** Defer weak DNS guesses so SRV/autoconfig probes start first. */
+const DNS_GUESS_DELAY_MS = 700;
+/** In-memory prefetch (per app session, per domain) — no disk persistence. */
+const PREFETCH_TTL_MS = 60_000;
 
 export type ImapDiscoverySource =
 	| "thunderbird"
@@ -31,6 +35,8 @@ export interface ImapDiscoveryResult {
 
 export interface MailboxDiscoveryResult extends ImapDiscoveryResult {
 	accessProtocol: MailAccessProtocol;
+	/** Present when discovery logged in successfully (skips a second connect). */
+	folders?: ImapFolder[];
 }
 
 interface ImapDiscoveryCandidate extends ImapDiscoveryResult {
@@ -124,10 +130,15 @@ function parseIncomingServerBlock(
 	};
 }
 
-async function fetchAutoconfigXml(url: string): Promise<string | null> {
+async function fetchAutoconfigXml(
+	url: string,
+	signal?: AbortSignal,
+): Promise<string | null> {
 	try {
 		const res = await fetch(url, {
-			signal: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
+			signal: signal
+				? AbortSignal.any([signal, AbortSignal.timeout(AUTOCONFIG_FETCH_MS)])
+				: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
 			headers: { Accept: "application/xml,text/xml" },
 		});
 		if (!res.ok) return null;
@@ -137,15 +148,12 @@ async function fetchAutoconfigXml(url: string): Promise<string | null> {
 	}
 }
 
-/** Race all autoconfig URLs; first valid IMAP block wins. */
+/** Race autoconfig URLs (domain first, Thunderbird CDN last). */
 async function raceImapAutoconfig(
 	domain: string,
+	abortSignal?: AbortSignal,
 ): Promise<{ host: string; port: number; secure: boolean; source: ImapDiscoverySource } | null> {
 	const urls: Array<{ url: string; source: ImapDiscoverySource }> = [
-		{
-			url: `https://autoconfig.thunderbird.net/v1.1/${domain}`,
-			source: "thunderbird",
-		},
 		{
 			url: `https://autoconfig.${domain}/mail/config-v1.1.xml`,
 			source: "autoconfig",
@@ -157,6 +165,10 @@ async function raceImapAutoconfig(
 		{
 			url: `https://mail.${domain}/mail/config-v1.1.xml`,
 			source: "autoconfig",
+		},
+		{
+			url: `https://autoconfig.thunderbird.net/v1.1/${domain}`,
+			source: "thunderbird",
 		},
 	];
 
@@ -171,8 +183,8 @@ async function raceImapAutoconfig(
 		};
 
 		for (const { url, source } of urls) {
-			void fetchAutoconfigXml(url).then((xml) => {
-				if (resolved) return;
+			void fetchAutoconfigXml(url, abortSignal).then((xml) => {
+				if (resolved || abortSignal?.aborted) return;
 				if (xml) {
 					const parsed = parseIncomingServerBlock(xml, "imap", source);
 					if (parsed) {
@@ -189,12 +201,9 @@ async function raceImapAutoconfig(
 
 async function racePopAutoconfig(
 	domain: string,
+	abortSignal?: AbortSignal,
 ): Promise<{ host: string; port: number; secure: boolean; source: PopDiscoverySource } | null> {
 	const urls: Array<{ url: string; source: PopDiscoverySource }> = [
-		{
-			url: `https://autoconfig.thunderbird.net/v1.1/${domain}`,
-			source: "thunderbird",
-		},
 		{
 			url: `https://autoconfig.${domain}/mail/config-v1.1.xml`,
 			source: "autoconfig",
@@ -206,6 +215,10 @@ async function racePopAutoconfig(
 		{
 			url: `https://mail.${domain}/mail/config-v1.1.xml`,
 			source: "autoconfig",
+		},
+		{
+			url: `https://autoconfig.thunderbird.net/v1.1/${domain}`,
+			source: "thunderbird",
 		},
 	];
 
@@ -220,7 +233,8 @@ async function racePopAutoconfig(
 		};
 
 		for (const { url, source } of urls) {
-			void fetchAutoconfigXml(url).then((xml) => {
+			void fetchAutoconfigXml(url, abortSignal).then((xml) => {
+				if (resolved || abortSignal?.aborted) return;
 				if (resolved) return;
 				if (xml) {
 					const parsed = parseIncomingServerBlock(xml, "pop3", source);
@@ -307,13 +321,176 @@ function candidateKey(c: { host: string; port: number; secure: boolean }): strin
 	return `${c.host}:${c.port}:${c.secure}`;
 }
 
+function dedupeImapCandidates(candidates: ImapDiscoveryCandidate[]): ImapDiscoveryCandidate[] {
+	const byKey = new Map<string, ImapDiscoveryCandidate>();
+	for (const c of candidates) {
+		const key = candidateKey(c);
+		const existing = byKey.get(key);
+		if (!existing || c.priority < existing.priority) {
+			byKey.set(key, c);
+		}
+	}
+	return [...byKey.values()];
+}
+
+function dedupePopCandidates(candidates: PopDiscoveryCandidate[]): PopDiscoveryCandidate[] {
+	const byKey = new Map<string, PopDiscoveryCandidate>();
+	for (const c of candidates) {
+		const key = candidateKey(c);
+		const existing = byKey.get(key);
+		if (!existing || c.priority < existing.priority) {
+			byKey.set(key, c);
+		}
+	}
+	return [...byKey.values()];
+}
+
+type PrefetchCacheEntry = {
+	imap: ImapDiscoveryCandidate[];
+	pop: PopDiscoveryCandidate[];
+	expiresAt: number;
+};
+
+const prefetchByDomain = new Map<string, PrefetchCacheEntry>();
+const prefetchInFlight = new Map<string, Promise<void>>();
+
+function getValidPrefetch(domain: string): PrefetchCacheEntry | null {
+	const entry = prefetchByDomain.get(domain);
+	if (!entry) return null;
+	if (entry.expiresAt <= Date.now()) {
+		prefetchByDomain.delete(domain);
+		return null;
+	}
+	return entry;
+}
+
+/** Resolve SRV + autoconfig + DNS guesses without login (for prefetch). */
+async function gatherImapCandidatesForPrefetch(
+	domain: string,
+	abortSignal?: AbortSignal,
+): Promise<ImapDiscoveryCandidate[]> {
+	const list: ImapDiscoveryCandidate[] = [];
+	const [imaps, imap, autoconfig] = await Promise.all([
+		resolveSrvCandidate(domain, `_imaps._tcp.${domain}`, 10),
+		resolveSrvCandidate(domain, `_imap._tcp.${domain}`, 12),
+		raceImapAutoconfig(domain, abortSignal),
+	]);
+	if (imaps) list.push(imaps);
+	if (imap) list.push(imap);
+	if (autoconfig) {
+		list.push(
+			toImapCandidate(autoconfig, autoconfig.source === "thunderbird" ? 15 : 18),
+		);
+	}
+	await new Promise((r) => setTimeout(r, DNS_GUESS_DELAY_MS));
+	if (!abortSignal?.aborted) {
+		list.push(...(await imapCandidatesFromDnsGuesses(domain)));
+	}
+	return dedupeImapCandidates(list);
+}
+
+async function gatherPopCandidatesForPrefetch(
+	domain: string,
+	abortSignal?: AbortSignal,
+): Promise<PopDiscoveryCandidate[]> {
+	const list: PopDiscoveryCandidate[] = [];
+	const autoconfig = await racePopAutoconfig(domain, abortSignal);
+	if (autoconfig) {
+		list.push(
+			toPopCandidate(autoconfig, autoconfig.source === "thunderbird" ? 15 : 18),
+		);
+	}
+	list.push(...(await popCandidatesFromDnsGuesses(domain)));
+	return dedupePopCandidates(list);
+}
+
+async function runPrefetchJob(domain: string): Promise<void> {
+	const abort = new AbortController();
+	try {
+		const [imap, pop] = await Promise.all([
+			gatherImapCandidatesForPrefetch(domain, abort.signal),
+			gatherPopCandidatesForPrefetch(domain, abort.signal),
+		]);
+		prefetchByDomain.set(domain, {
+			imap,
+			pop,
+			expiresAt: Date.now() + PREFETCH_TTL_MS,
+		});
+	} finally {
+		abort.abort();
+	}
+}
+
+/**
+ * Warm SRV/autoconfig/DNS for a domain while the user types their password.
+ * Results live in memory only (cleared on app quit or after TTL).
+ */
+export function prefetchMailboxDiscovery(email: string): { started: boolean; domain?: string } {
+	const trimmed = email.trim();
+	const domain = emailDomain(trimmed);
+	if (!domain || !trimmed.includes("@")) {
+		return { started: false };
+	}
+
+	if (getValidPrefetch(domain)) {
+		return { started: true, domain };
+	}
+
+	if (prefetchInFlight.has(domain)) {
+		return { started: true, domain };
+	}
+
+	const job = runPrefetchJob(domain).finally(() => {
+		prefetchInFlight.delete(domain);
+	});
+	prefetchInFlight.set(domain, job);
+	return { started: true, domain };
+}
+
+function enqueuePrefetchedImap(
+	domain: string,
+	enqueue: (c: ImapDiscoveryCandidate) => void,
+): void {
+	for (const c of getValidPrefetch(domain)?.imap ?? []) {
+		enqueue(c);
+	}
+	const inflight = prefetchInFlight.get(domain);
+	if (inflight) {
+		void inflight.then(() => {
+			for (const c of getValidPrefetch(domain)?.imap ?? []) {
+				enqueue(c);
+			}
+		});
+	}
+}
+
+function enqueuePrefetchedPop(
+	domain: string,
+	enqueue: (c: PopDiscoveryCandidate) => void,
+): void {
+	for (const c of getValidPrefetch(domain)?.pop ?? []) {
+		enqueue(c);
+	}
+	const inflight = prefetchInFlight.get(domain);
+	if (inflight) {
+		void inflight.then(() => {
+			for (const c of getValidPrefetch(domain)?.pop ?? []) {
+				enqueue(c);
+			}
+		});
+	}
+}
+
 /** Push IMAP candidates into the race pool; calls onSourceDone once per parallel source. */
 function streamImapCandidates(
 	domain: string,
 	enqueue: (c: ImapDiscoveryCandidate) => void,
 	onSourceDone: () => void,
+	abortSignal?: AbortSignal,
 ): void {
 	const done = () => onSourceDone();
+
+	enqueuePrefetchedImap(domain, enqueue);
 
 	void resolveSrvCandidate(domain, `_imaps._tcp.${domain}`, 10)
 		.then((c) => {
@@ -327,7 +504,7 @@ function streamImapCandidates(
 		})
 		.finally(done);
 
-	void raceImapAutoconfig(domain)
+	void raceImapAutoconfig(domain, abortSignal)
 		.then((parsed) => {
 			if (parsed) {
 				enqueue(
@@ -337,11 +514,12 @@ function streamImapCandidates(
 		})
 		.finally(done);
 
-	void imapCandidatesFromDnsGuesses(domain)
-		.then((list) => {
-			for (const c of list) enqueue(c);
-		})
-		.finally(done);
+	void (async () => {
+		await new Promise((r) => setTimeout(r, DNS_GUESS_DELAY_MS));
+		if (abortSignal?.aborted) return;
+		const list = await imapCandidatesFromDnsGuesses(domain);
+		for (const c of list) enqueue(c);
+	})().finally(done);
 }
 
 function streamPopCandidates(
@@ -350,6 +528,8 @@ function streamPopCandidates(
 	onSourceDone: () => void,
 ): void {
 	const done = () => onSourceDone();
+
+	enqueuePrefetchedPop(domain, enqueue);
 
 	void racePopAutoconfig(domain)
 		.then((parsed) => {
@@ -368,9 +548,12 @@ function streamPopCandidates(
 		.finally(done);
 }
 
-function imapResultFromCandidate(candidate: ImapDiscoveryCandidate): MailboxDiscoveryResult {
+function imapResultFromCandidate(
+	candidate: ImapDiscoveryCandidate,
+	folders?: ImapFolder[],
+): MailboxDiscoveryResult {
 	const { priority: _p, ...result } = candidate;
-	return { ...result, verified: true, accessProtocol: "imap" };
+	return { ...result, verified: true, accessProtocol: "imap", folders };
 }
 
 function popResultFromCandidate(candidate: PopDiscoveryCandidate): MailboxDiscoveryResult {
@@ -386,24 +569,33 @@ async function raceVerifyImapCandidates(
 	email: string,
 	domain: string,
 	password?: string,
-): Promise<ImapDiscoveryCandidate | null> {
+	collectFolders = false,
+): Promise<{ candidate: ImapDiscoveryCandidate | null; folders?: ImapFolder[] }> {
 	const trimmedPassword = password?.trim();
+	const abort = new AbortController();
+	let winningFolders: ImapFolder[] | undefined;
+
 	const race = createStreamingRace<ImapDiscoveryCandidate>({
 		maxConcurrency: DISCOVERY_PROBE_CONCURRENCY,
 		budgetMs: DISCOVERY_BUDGET_MS,
 		candidateKey,
 		probe: async (c) => {
 			if (trimmedPassword) {
-				return probeImapLogin({
-					provider: "generic",
-					email,
-					host: c.host,
-					port: c.port,
-					secure: c.secure,
-					authMethod: "password",
-					password: trimmedPassword,
-					accessProtocol: "imap",
-				});
+				const { result, folders } = await probeImapLoginDetailed(
+					{
+						provider: "generic",
+						email,
+						host: c.host,
+						port: c.port,
+						secure: c.secure,
+						authMethod: "password",
+						password: trimmedPassword,
+						accessProtocol: "imap",
+					},
+					{ listFolders: collectFolders },
+				);
+				if (result === "ok" && folders) winningFolders = folders;
+				return result;
 			}
 			const live = await probeImapBanner(
 				c.host,
@@ -420,8 +612,10 @@ async function raceVerifyImapCandidates(
 		pendingSources--;
 		if (pendingSources === 0) race.close();
 	};
-	streamImapCandidates(domain, (c) => race.enqueue(c), onSourceDone);
-	return race.wait();
+	streamImapCandidates(domain, (c) => race.enqueue(c), onSourceDone, abort.signal);
+	const candidate = await race.wait();
+	abort.abort();
+	return { candidate, folders: winningFolders };
 }
 
 async function raceVerifyPopCandidates(
@@ -462,7 +656,7 @@ async function raceVerifyPopCandidates(
  */
 export async function discoverMailboxSettings(
 	email: string,
-	options?: { password?: string },
+	options?: { password?: string; collectFolders?: boolean },
 ): Promise<MailboxDiscoveryResult> {
 	const trimmed = email.trim();
 	const domain = emailDomain(trimmed);
@@ -471,10 +665,16 @@ export async function discoverMailboxSettings(
 	}
 
 	const password = options?.password?.trim();
+	const collectFolders = Boolean(options?.collectFolders && password);
 
-	const imapVerified = await raceVerifyImapCandidates(trimmed, domain, password);
-	if (imapVerified) {
-		return imapResultFromCandidate(imapVerified);
+	const imapVerified = await raceVerifyImapCandidates(
+		trimmed,
+		domain,
+		password,
+		collectFolders,
+	);
+	if (imapVerified.candidate) {
+		return imapResultFromCandidate(imapVerified.candidate, imapVerified.folders);
 	}
 
 	if (password) {

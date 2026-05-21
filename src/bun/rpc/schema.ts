@@ -55,6 +55,10 @@ export type MailPortRPC = {
 					source: "thunderbird" | "autoconfig" | "srv" | "guess";
 				};
 			};
+			prefetchMailDiscovery: {
+				params: { email: string };
+				response: { started: boolean; domain?: string };
+			};
 			listFolders: {
 				params: { credentials: MailboxCredentials };
 				response: ImapFolder[];

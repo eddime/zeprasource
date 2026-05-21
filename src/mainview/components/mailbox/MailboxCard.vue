@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from "vue";
-import { applyProviderFromEmail } from "../../../shared/mailbox-provider";
+import { computed, onUnmounted, ref, watch } from "vue";
+import { applyProviderFromEmail, emailDomain } from "../../../shared/mailbox-provider";
+import { getRpc } from "../../lib/electrobun";
 import { splitImapHostInput } from "../../../shared/imap-host-input";
 import type { MailboxCredentials } from "../../../shared/types";
 import { PROVIDER_PRESETS } from "../../../shared/types";
@@ -35,10 +36,33 @@ const overlayVisible = computed(() => props.validated && showConnectedOverlay.va
 const localError = ref<string | null>(null);
 const displayError = computed(() => props.error ?? localError.value);
 
+let prefetchTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleDiscoveryPrefetch(email: string) {
+	if (prefetchTimer) clearTimeout(prefetchTimer);
+	if (props.validated || props.testing || credentials.value.host.trim()) return;
+
+	const trimmed = email.trim();
+	const domain = emailDomain(trimmed);
+	if (!domain || !trimmed.includes("@")) return;
+
+	prefetchTimer = setTimeout(() => {
+		prefetchTimer = null;
+		void getRpc().request.prefetchMailDiscovery({ email: trimmed }).catch(() => {
+			/* prefetch is best-effort */
+		});
+	}, 400);
+}
+
+onUnmounted(() => {
+	if (prefetchTimer) clearTimeout(prefetchTimer);
+});
+
 watch(
 	() => credentials.value.email,
 	(email, previousEmail) => {
 		applyProviderFromEmail(credentials.value, email, previousEmail);
+		scheduleDiscoveryPrefetch(email);
 	},
 );
 
