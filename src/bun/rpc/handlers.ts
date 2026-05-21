@@ -17,6 +17,7 @@ import {
 } from "../services/imap/mailbox-profile";
 import { discoverMailboxSettings as lookupMailboxSettings } from "../services/imap/imap-autodiscover";
 import {
+	connectMailbox,
 	estimateMailMigrationSize,
 	measureMailFolderSizes,
 	testMailConnection,
@@ -91,6 +92,8 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 
 			discoverImapSettings: async ({ email, password }) =>
 				lookupMailboxSettings(email, { password }),
+
+			connectMailbox: async ({ email, password }) => connectMailbox(email, password),
 
 			listFolders: async ({ credentials }) => {
 				const result = await testMailConnection(credentials);

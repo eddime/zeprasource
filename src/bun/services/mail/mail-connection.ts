@@ -1,4 +1,5 @@
 import { isPop3Access } from "../../../shared/mail-access";
+import type { MailAccessProtocol } from "../../../shared/mail-access";
 import type {
 	ConnectionTestResult,
 	FolderSizeEstimate,
@@ -6,6 +7,10 @@ import type {
 	MailboxCredentials,
 	MigrationSizeEstimate,
 } from "../../../shared/types";
+import {
+	discoverMailboxSettings,
+	type ImapDiscoverySource,
+} from "../imap/imap-autodiscover";
 import {
 	estimateMigrationSize as estimateImapMigrationSize,
 	measureFolderSizes as measureImapFolderSizes,
@@ -26,6 +31,46 @@ export async function testMailConnection(
 		return testPop3Connection(credentials);
 	}
 	return testImapConnection(credentials);
+}
+
+export type ConnectMailboxResult = ConnectionTestResult & {
+	host: string;
+	port: number;
+	secure: boolean;
+	provider: MailboxCredentials["provider"];
+	accessProtocol: MailAccessProtocol;
+	source: ImapDiscoverySource;
+};
+
+/** Streaming autodiscovery + connection test in one RPC round-trip. */
+export async function connectMailbox(
+	email: string,
+	password: string,
+): Promise<ConnectMailboxResult> {
+	const trimmedEmail = email.trim();
+	const discovered = await discoverMailboxSettings(trimmedEmail, {
+		password: password.trim(),
+	});
+	const credentials: MailboxCredentials = {
+		provider: discovered.provider,
+		email: trimmedEmail,
+		host: discovered.host,
+		port: discovered.port,
+		secure: discovered.secure,
+		authMethod: "password",
+		password: password.trim(),
+		accessProtocol: discovered.accessProtocol,
+	};
+	const connection = await testMailConnection(credentials);
+	return {
+		...connection,
+		host: discovered.host,
+		port: discovered.port,
+		secure: discovered.secure,
+		provider: discovered.provider,
+		accessProtocol: discovered.accessProtocol,
+		source: discovered.source,
+	};
 }
 
 export async function measureMailFolderSizes(

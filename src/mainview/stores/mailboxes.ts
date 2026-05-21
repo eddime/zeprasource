@@ -101,17 +101,39 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 					return false;
 				}
 				try {
-					const discovered = await rpc.request.discoverImapSettings({
+					const connected = await rpc.request.connectMailbox({
 						email: creds.email,
-						password: creds.password,
+						password: creds.password!,
 					});
-					creds.host = discovered.host;
-					creds.port = discovered.port;
-					creds.secure = discovered.secure;
-					creds.provider = discovered.provider;
-					creds.accessProtocol = discovered.accessProtocol;
+					creds.host = connected.host;
+					creds.port = connected.port;
+					creds.secure = connected.secure;
+					creds.provider = connected.provider;
+					creds.accessProtocol = connected.accessProtocol;
 					if (isSource) source.value = { ...creds };
 					else destination.value = { ...creds };
+
+					if (!connected.success) {
+						const msg = connected.error ?? "Could not connect";
+						if (isSource) {
+							sourceTestError.value = msg;
+							sourceValidated.value = false;
+						} else {
+							destTestError.value = msg;
+							destValidated.value = false;
+						}
+						return false;
+					}
+					if (isSource) {
+						sourceFolders.value = connected.folders ?? [];
+						sourceValidated.value = true;
+					} else {
+						destFolders.value = connected.folders ?? [];
+						destValidated.value = true;
+					}
+					buildFolderMappings();
+					await rpc.request.saveMailboxProfile({ role: target, credentials: creds });
+					return true;
 				} catch (error) {
 					const msg =
 						error instanceof Error

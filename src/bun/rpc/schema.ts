@@ -39,16 +39,20 @@ export type MailPortRPC = {
 					port: number;
 					secure: boolean;
 					provider: MailboxCredentials["provider"];
-					source:
-						| "preset"
-						| "thunderbird"
-						| "autoconfig"
-						| "srv"
-						| "mx"
-						| "guess"
-						| "hosting";
+					source: "thunderbird" | "autoconfig" | "srv" | "guess";
 					verified: boolean;
 					accessProtocol: "imap" | "pop3";
+				};
+			};
+			connectMailbox: {
+				params: { email: string; password: string };
+				response: ConnectionTestResult & {
+					host: string;
+					port: number;
+					secure: boolean;
+					provider: MailboxCredentials["provider"];
+					accessProtocol: "imap" | "pop3";
+					source: "thunderbird" | "autoconfig" | "srv" | "guess";
 				};
 			};
 			listFolders: {
