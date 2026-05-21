@@ -8,9 +8,22 @@ const props = withDefaults(
 		label: string;
 		disabled?: boolean;
 		loading?: boolean;
+		/** 0–100: fills the CTA background left-to-right (e.g. folder measurement). */
+		progress?: number;
 	}>(),
 	{ disabled: false, loading: false },
 );
+
+const clampedProgress = computed(() => {
+	if (props.progress === undefined) return null;
+	return Math.min(100, Math.max(0, props.progress));
+});
+
+const showProgressFill = computed(
+	() => clampedProgress.value !== null && (props.loading || props.disabled),
+);
+
+const showProgressSpinner = computed(() => showProgressFill.value);
 
 defineEmits<{ action: [] }>();
 
@@ -34,7 +47,7 @@ watch(isInactive, (inactive, wasInactive) => {
 const dockCtaHot = ref(false);
 
 const iconKind = computed((): "migrate" | "pending" | "measure" | null => {
-	if (props.loading) return null;
+	if (props.loading || showProgressSpinner.value) return null;
 	if (props.label === "Waiting for connection") return "pending";
 	if (props.label.includes("Measuring")) return "measure";
 	return "migrate";
@@ -146,7 +159,13 @@ onUnmounted(() => {
 			'dock-ready': isReady,
 			'dock-ready-pulse': showReadyPulse,
 			'dock-cta-hot': dockCtaHot,
+			'dock-cta-progress': showProgressFill,
 		}"
+		:style="
+			clampedProgress !== null
+				? { '--dock-progress': `${clampedProgress}%` }
+				: undefined
+		"
 	>
 		<div class="dock-shell">
 			<div v-if="$slots.top" class="app-dock-top">
@@ -162,7 +181,13 @@ onUnmounted(() => {
 					:class="{ 'dock-cta-tracking': ctaTracking }"
 					variant="primary"
 					:disabled="disabled"
-					:loading="loading"
+					:loading="loading && clampedProgress === null"
+					:aria-valuenow="showProgressFill ? clampedProgress ?? undefined : undefined"
+					:aria-valuemin="showProgressFill ? 0 : undefined"
+					:aria-valuemax="showProgressFill ? 100 : undefined"
+					:aria-valuetext="
+						showProgressFill ? `${clampedProgress}% complete` : undefined
+					"
 					:style="ctaTiltStyle"
 					@pointerenter="onCtaPointerEnter"
 					@pointermove="onCtaPointerMove"
@@ -171,6 +196,7 @@ onUnmounted(() => {
 				>
 					<span class="dock-cta-inner">
 						<span class="dock-label">{{ label }}</span>
+						<span v-if="showProgressSpinner" class="spin" aria-hidden="true" />
 						<DockIcon v-if="iconKind" :kind="iconKind" />
 					</span>
 				</AppButton>
@@ -346,10 +372,31 @@ onUnmounted(() => {
 	background: transparent;
 	color: #fff;
 	opacity: 1;
+	position: relative;
+	overflow: hidden;
+	isolation: isolate;
 	transition:
 		font-size 0.62s var(--dock-ease-bounce),
 		color 0.15s ease,
 		opacity 0.15s ease;
+}
+
+.app-dock.dock-cta-progress :deep(.dock-cta.btn)::before {
+	content: "";
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: var(--dock-progress, 0%);
+	background: #0a0a0a;
+	transition: width 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+	z-index: 0;
+	pointer-events: none;
+}
+
+.app-dock.dock-cta-progress :deep(.dock-cta-inner) {
+	position: relative;
+	z-index: 1;
 }
 
 .app-dock.dock-ready.dock-cta-hot :deep(.dock-cta.btn:not(:disabled)),
@@ -460,8 +507,19 @@ onUnmounted(() => {
 }
 
 .app-dock :deep(.dock-cta .spin) {
-	border-color: rgba(255, 255, 255, 0.25);
+	width: 0.85rem;
+	height: 0.85rem;
+	flex-shrink: 0;
+	border: 2px solid rgba(255, 255, 255, 0.25);
 	border-top-color: rgba(255, 255, 255, 0.45);
+	border-radius: 50%;
+	animation: dock-spin 0.6s linear infinite;
+}
+
+@keyframes dock-spin {
+	to {
+		transform: rotate(360deg);
+	}
 }
 
 @media (prefers-reduced-motion: reduce) {

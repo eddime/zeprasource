@@ -53,6 +53,8 @@ export interface MigrationProgress {
 		| "connecting"
 		| "scanning"
 		| "indexing"
+		| "ingesting"
+		| "delivering"
 		| "transferring"
 		| "retrying"
 		| "throttled"
@@ -125,6 +127,14 @@ export interface FolderSizeEstimate {
 	path: string;
 	messages: number;
 	bytes: number;
+}
+
+/** Progressive folder measurement (Step 2); no credentials in payload. */
+export interface FolderStatsProgress {
+	requestId: string;
+	folder: FolderSizeEstimate;
+	completed: number;
+	total: number;
 }
 
 export type { MigrationDurationEstimate } from "./migration-duration";

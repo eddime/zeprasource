@@ -14,9 +14,38 @@ import {
 	normalizeMailboxCredentials,
 	validateMailboxCredentials,
 } from "./credentials";
+import {
+	describeImapCompression,
+	getImapSessionPrefs,
+	isImapDeflateActive,
+	preferImapCompression,
+	serverAdvertisesCompress,
+	setImapSessionPrefs,
+	shouldRetryImapWithoutCompression,
+} from "./imap-compression";
+
+export {
+	describeImapCompression,
+	isImapDeflateActive,
+	serverAdvertisesCompress,
+} from "./imap-compression";
 
 /** Shorter timeouts for probes/tests; longer for live migration transfers. */
 export type ImapClientMode = "migration" | "test" | "probe";
+
+const loggedMigrationConnects = new Set<string>();
+
+function logMigrationConnectOnce(
+	credentials: MailboxCredentials,
+	mode: ImapClientMode,
+	wire: string,
+): void {
+	if (mode !== "migration") return;
+	const key = `${credentials.host}:${credentials.port}`;
+	if (loggedMigrationConnects.has(key)) return;
+	loggedMigrationConnects.add(key);
+	logger.info("imap", `Source/dest session ${key} wire=${wire} (reused for all folders)`);
+}
 
 const IMAP_TIMEOUTS: Record<
 	ImapClientMode,
@@ -66,19 +95,46 @@ export async function connectImapClient(
 	mode: ImapClientMode = "migration",
 ): Promise<ImapFlow> {
 	const credentials = normalizeMailboxCredentials(raw);
-	const attempts: boolean[] = credentials.relaxedTls ? [true] : [false, true];
+	const tlsAttempts: boolean[] = credentials.relaxedTls ? [true] : [false, true];
+	const wantCompression = preferImapCompression(credentials.host, mode);
 	let lastError: unknown;
 
-	for (const relaxedTls of attempts) {
-		const client = await createImapClient({ ...credentials, relaxedTls }, mode);
-		try {
-			await client.connect();
-			return client;
-		} catch (error) {
-			lastError = error;
-			await safeCloseImapClient(client);
-			if (!shouldRetryImapWithRelaxedTls(error, relaxedTls, credentials)) break;
+	for (const relaxedTls of tlsAttempts) {
+		const compressionAttempts = wantCompression ? [false, true] : [true];
+
+		for (const disableCompression of compressionAttempts) {
+			setImapSessionPrefs(credentials, { disableCompression });
+			let client: ImapFlow | null = null;
+			try {
+				client = await createImapClient(
+					{ ...credentials, relaxedTls },
+					mode,
+					disableCompression,
+				);
+				await client.connect();
+				logMigrationConnectOnce(
+					credentials,
+					mode,
+					describeImapCompression(client),
+				);
+				return client;
+			} catch (error) {
+				lastError = error;
+				if (client) await safeCloseImapClient(client);
+
+				if (disableCompression) continue;
+				if (!wantCompression || !shouldRetryImapWithoutCompression(error)) {
+					break;
+				}
+				logger.warn(
+					"imap",
+					`COMPRESS=DEFLATE failed for ${credentials.host}, retrying without compression`,
+					error instanceof Error ? error.message : String(error),
+				);
+			}
 		}
+
+		if (!shouldRetryImapWithRelaxedTls(lastError, relaxedTls, credentials)) break;
 	}
 
 	throw lastError;
@@ -103,9 +159,13 @@ export async function safeCloseImapClient(client: ImapFlow): Promise<void> {
 export async function createImapClient(
 	raw: MailboxCredentials,
 	mode: ImapClientMode = "migration",
+	disableCompression?: boolean,
 ): Promise<ImapFlow> {
 	const credentials = normalizeMailboxCredentials(raw);
 	const user = credentials.username || credentials.email;
+	const prefs = getImapSessionPrefs(credentials);
+	const noCompress =
+		disableCompression ?? prefs.disableCompression ?? !preferImapCompression(credentials.host, mode);
 
 	const timeouts = IMAP_TIMEOUTS[mode];
 	const client = new ImapFlow({
@@ -114,6 +174,7 @@ export async function createImapClient(
 		secure: credentials.secure,
 		auth: { user, pass: credentials.password ?? "" },
 		logger: false,
+		disableCompression: noCompress,
 		...timeouts,
 		tls: {
 			rejectUnauthorized: !credentials.relaxedTls,
@@ -138,15 +199,26 @@ export async function testImapConnection(
 
 	const client = await connectImapClient(credentials, "test");
 	try {
-		const mailboxes = await client.list();
-		const folders: ImapFolder[] = mailboxes
-			.filter((box) => !box.flags?.has("\\Noselect"))
-			.map((box) => ({
+		const mailboxes = await client.list({ statusQuery: { messages: true } });
+		const folders: ImapFolder[] = [];
+		for (const box of mailboxes.filter((entry) => !entry.flags?.has("\\Noselect"))) {
+			let messageCount = box.status?.messages;
+			if (typeof messageCount !== "number") {
+				try {
+					const status = await client.status(box.path, { messages: true });
+					messageCount = status.messages ?? 0;
+				} catch {
+					messageCount = 0;
+				}
+			}
+			folders.push({
 				path: box.path,
 				name: box.name,
 				delimiter: box.delimiter,
 				attributes: Array.from(box.flags ?? []),
-			}));
+				messageCount,
+			});
+		}
 		await client.logout();
 		return { success: true, folders };
 	} catch (error) {
@@ -203,6 +275,34 @@ function parseFetchedMessage(
 		internalDate,
 		messageId: fetched.envelope?.messageId,
 	};
+}
+
+export type FetchedEnvelope = {
+	uid: number;
+	messageId?: string;
+};
+
+/** Lightweight FETCH for server-side COPY duplicate checks. */
+export async function fetchEnvelopeBatch(
+	client: ImapFlow,
+	folderPath: string,
+	uids: number[],
+): Promise<FetchedEnvelope[]> {
+	if (uids.length === 0) return [];
+	const lock = await client.getMailboxLock(folderPath);
+	try {
+		const results: FetchedEnvelope[] = [];
+		for await (const msg of client.fetch(uids, { envelope: true }, { uid: true })) {
+			if (!msg.uid) continue;
+			results.push({
+				uid: msg.uid,
+				messageId: msg.envelope?.messageId,
+			});
+		}
+		return results;
+	} finally {
+		lock.release();
+	}
 }
 
 export async function fetchMessagesBatch(
@@ -290,50 +390,7 @@ export function flagsToArray(flags: Set<string> | undefined): string[] {
 	return Array.from(flags);
 }
 
-const SIZE_FETCH_BATCH = 500;
-
-export async function measureFolderSizes(
-	credentials: MailboxCredentials,
-	folderPaths: string[],
-): Promise<FolderSizeEstimate[]> {
-	const normalized = normalizeMailboxCredentials(credentials);
-	const client = await connectImapClient(normalized, "test");
-	const folders: FolderSizeEstimate[] = [];
-
-	try {
-		for (const folderPath of folderPaths) {
-			const lock = await client.getMailboxLock(folderPath);
-			try {
-				const uids = await client.search({ all: true }, { uid: true });
-				const uidList = Array.isArray(uids) ? uids : [];
-				let folderBytes = 0;
-
-				for (let i = 0; i < uidList.length; i += SIZE_FETCH_BATCH) {
-					const batch = uidList.slice(i, i + SIZE_FETCH_BATCH);
-					for await (const msg of client.fetch(batch, { size: true }, { uid: true })) {
-						folderBytes += msg.size ?? 0;
-					}
-				}
-
-				folders.push({
-					path: folderPath,
-					messages: uidList.length,
-					bytes: folderBytes,
-				});
-			} finally {
-				lock.release();
-			}
-		}
-		await client.logout();
-	} catch (error) {
-		const message = formatImapError(error, normalized);
-		throw new Error(message);
-	} finally {
-		await safeCloseImapClient(client);
-	}
-
-	return folders;
-}
+export { measureFolderSizes } from "./imap-folder-measure";
 
 export async function estimateMigrationSize(
 	source: MailboxCredentials,

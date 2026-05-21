@@ -87,6 +87,26 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_migration_messages_folder_hash_uid
 CREATE INDEX IF NOT EXISTS idx_migration_folders_source_path_hash
   ON migration_folders(migration_id, source_path_hash);
 
+CREATE TABLE IF NOT EXISTS migration_dest_dedup_meta (
+  migration_id TEXT NOT NULL,
+  dest_folder_hash TEXT NOT NULL,
+  dest_path TEXT NOT NULL,
+  built_at TEXT NOT NULL DEFAULT (datetime('now')),
+  PRIMARY KEY (migration_id, dest_folder_hash),
+  FOREIGN KEY (migration_id) REFERENCES migrations(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS migration_dest_message_ids (
+  migration_id TEXT NOT NULL,
+  dest_folder_hash TEXT NOT NULL,
+  message_id TEXT NOT NULL,
+  PRIMARY KEY (migration_id, dest_folder_hash, message_id),
+  FOREIGN KEY (migration_id) REFERENCES migrations(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_migration_dest_message_ids_lookup
+  ON migration_dest_message_ids(migration_id, dest_folder_hash);
+
 CREATE INDEX IF NOT EXISTS idx_migrations_status ON migrations(status);
 
 CREATE TABLE IF NOT EXISTS migration_payment_entitlements (
@@ -156,6 +176,25 @@ function applySchemaMigrations(database: Database): void {
 		addColumn(
 			"ALTER TABLE mailbox_profiles ADD COLUMN access_protocol TEXT NOT NULL DEFAULT 'imap'",
 		);
+	}
+
+	const messageColumns = database
+		.query("PRAGMA table_info(migration_messages)")
+		.all() as Array<{ name: string }>;
+	const messageNames = new Set(messageColumns.map((c) => c.name));
+	if (!messageNames.has("source_folder_hash")) {
+		addColumn("ALTER TABLE migration_messages ADD COLUMN source_folder_hash TEXT");
+	}
+	if (!messageNames.has("content_sha256")) {
+		addColumn("ALTER TABLE migration_messages ADD COLUMN content_sha256 TEXT");
+	}
+
+	const folderColumns = database
+		.query("PRAGMA table_info(migration_folders)")
+		.all() as Array<{ name: string }>;
+	const folderNames = new Set(folderColumns.map((c) => c.name));
+	if (!folderNames.has("source_path_hash")) {
+		addColumn("ALTER TABLE migration_folders ADD COLUMN source_path_hash TEXT");
 	}
 }
 

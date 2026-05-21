@@ -1,36 +1,27 @@
 import type { Database } from "bun:sqlite";
-import type { FolderMapping, MailboxCredentials } from "../../../shared/types";
+import type { FolderMapping } from "../../../shared/types";
 import type { MigrationTransferConfig } from "./migration-autopilot";
 import { logger } from "../../utils/logger";
-import {
-	buildDestinationMessageIdIndex,
-	normalizeMessageId,
-} from "../imap/destination-message-index";
-import {
-	appendMessage,
-	connectImapClient,
-	flagsToArray,
-	safeCloseImapClient,
-	type FetchedMigrationMessage,
-} from "../imap/imap-client";
-import {
-	closeMailSource,
-	fetchSourceMessagesBatch,
-	openMailSource,
-	type MailSourceSession,
-} from "../mail/mail-source";
-import {
-	INTER_BATCH_PAUSE_MS,
-	MESSAGE_TRANSFER_TIMEOUT_MS,
-	MIGRATION_FETCH_BATCH_SIZE,
-	MIGRATION_RETRY_DELAY_DEFAULTS,
-} from "./migration-constants";
+import { copyMessagesUidBatch } from "../imap/imap-copy-batch";
+import { resolveDestinationDuplicateIds } from "../imap/destination-dedup-cache";
+import { fetchEnvelopeBatch, type FetchedMigrationMessage } from "../imap/imap-client";
+import { normalizeMessageId } from "../imap/destination-message-index";
+import { toAppendPayload } from "../imap/imap-append-batch";
+import type { ResilientMailSource } from "../mail/resilient-mail-source";
+import { TransferBatchQueue } from "./transfer-batch-queue";
 import {
 	classifyMigrationError,
 	type MigrationErrorClassification,
 } from "./migration-errors";
 import { computeRetryDelay } from "./retry-policy";
+import {
+	listStagedUidsForFolder,
+	listStagedUidsForFolderBySize,
+} from "../../db/migration-repository";
 import { writeBackupMessage } from "../backup/backup-writer";
+import { migrationStagingRoot } from "./migration-staging-path";
+import { MigrationStagingStore } from "./migration-staging-store";
+import { SharedDestAppender } from "./shared-dest-appender";
 
 export function shardUids(uids: number[], laneCount: number): number[][] {
 	if (uids.length === 0) return [];
@@ -81,250 +72,41 @@ type MarkMessageFn = (
 	messageId?: string,
 	error?: string,
 	retryCount?: number,
+	contentSha256?: string | null,
 ) => void;
 
-async function withTimeout<T>(
-	promise: Promise<T>,
-	ms: number,
-	label: string,
-): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<T>((_, reject) => {
-				timer = setTimeout(
-					() => reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s`)),
-					ms,
-				);
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
+export type FolderTransferPhase = "combined" | "ingest" | "deliver";
+
+function stagedUidsForDeliver(ctx: TransferContext, fallback: number[]): number[] {
+	const sorted = listStagedUidsForFolderBySize(ctx.migrationId, ctx.mapping.sourcePath);
+	if (sorted.length > 0) {
+		return sorted.map((r) => r.uid);
 	}
+	return fallback;
 }
 
-async function transferMessage(
-	db: Database,
-	migrationId: string,
-	mapping: FolderMapping,
-	msg: FetchedMigrationMessage,
-	transfer: MigrationTransferConfig,
-	destClient: Awaited<ReturnType<typeof connectImapClient>> | null,
-	destMessageIds: Set<string>,
-	duplicateLock: ReturnType<typeof createAsyncMutex>,
-	backupAccountDir: string | null,
-	markMessage: MarkMessageFn,
-	hooks: FolderTransferHooks,
-	backupOnly: boolean,
-): Promise<void> {
-	const { uid, source, flags, internalDate, messageId } = msg;
-
-	if (backupOnly) {
-		if (!backupAccountDir) {
-			throw new Error("Backup folder is not configured.");
-		}
-		const backupResult = await writeBackupMessage({
-			accountDir: backupAccountDir,
-			folderPath: mapping.sourcePath,
-			uid,
-			source,
-		});
-		if (backupResult.status === "failed") {
-			throw new Error(backupResult.error);
-		}
-		const size = source.byteLength;
-		markMessage(db, migrationId, mapping.sourcePath, uid, "completed", size, messageId);
-		hooks.onMessageCompleted(uid, size);
-		return;
-	}
-
-	let reservedMessageIdKey: string | undefined;
-	if (transfer.skipDuplicates && messageId) {
-		const key = normalizeMessageId(messageId);
-		const skip = await duplicateLock.run(async () => {
-			if (destMessageIds.has(key)) return true;
-			destMessageIds.add(key);
-			return false;
-		});
-		if (skip) {
-			markMessage(db, migrationId, mapping.sourcePath, uid, "completed", 0, messageId);
-			hooks.onMessageCompleted(uid, 0);
-			return;
-		}
-		reservedMessageIdKey = key;
-	}
-
-	const flagList = transfer.preserveFlags ? flagsToArray(flags) : undefined;
-	try {
-		await withTimeout(
-			appendMessage(destClient!, mapping.destPath, source, {
-				flags: flagList,
-				internalDate,
-			}),
-			MESSAGE_TRANSFER_TIMEOUT_MS,
-			`Append to ${mapping.destPath}`,
-		);
-	} catch (error) {
-		if (reservedMessageIdKey) {
-			await duplicateLock.run(async () => {
-				destMessageIds.delete(reservedMessageIdKey!);
-			});
-		}
-		throw error;
-	}
-
-	if (backupAccountDir) {
-		const backupResult = await writeBackupMessage({
-			accountDir: backupAccountDir,
-			folderPath: mapping.sourcePath,
-			uid,
-			source,
-		});
-		if (backupResult.status === "failed") {
-			logger.warn(
-				"backup",
-				`Backup write failed for ${mapping.sourcePath} uid ${uid}`,
-				backupResult.error,
-			);
-		}
-	}
-
-	const size = source.byteLength;
-	markMessage(db, migrationId, mapping.sourcePath, uid, "completed", size, messageId);
-	hooks.onMessageCompleted(uid, size);
-}
-
-async function runMigrationLane(options: {
+type TransferContext = {
 	db: Database;
 	migrationId: string;
 	mapping: FolderMapping;
-	sourceCreds: MailboxCredentials;
-	destCreds: MailboxCredentials;
-	uids: number[];
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
 	backupAccountDir: string | null;
-	backupOnly: boolean;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
-}): Promise<void> {
-	const {
-		db,
-		migrationId,
-		mapping,
-		sourceCreds,
-		destCreds,
-		uids,
-		transfer,
-		destMessageIds,
-		duplicateLock,
-		backupAccountDir,
-		backupOnly,
-		markMessage,
-		hooks,
-	} = options;
+	backupOnly: boolean;
+	sharedDest: SharedDestAppender | null;
+	staging: MigrationStagingStore | null;
+	resilientSource: ResilientMailSource;
+	useServerSideCopy: boolean;
+	transferPhase: FolderTransferPhase;
+};
 
-	const sourceSession = await openMailSource(sourceCreds);
-	const destClient = backupOnly ? null : await connectImapClient(destCreds);
-	try {
-
-		let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
-		for (let i = 0; i < uids.length; i += MIGRATION_FETCH_BATCH_SIZE) {
-			if (hooks.shouldStop()) return;
-			await hooks.waitWhilePaused();
-			if (hooks.shouldStop()) return;
-
-			const batchUids = uids.slice(i, i + MIGRATION_FETCH_BATCH_SIZE);
-			const nextBatchUids = uids.slice(
-				i + MIGRATION_FETCH_BATCH_SIZE,
-				i + 2 * MIGRATION_FETCH_BATCH_SIZE,
-			);
-			const currentFetch =
-				prefetchedBatch ??
-				fetchSourceMessagesBatch(sourceSession, mapping.sourcePath, batchUids);
-			prefetchedBatch =
-				nextBatchUids.length > 0
-					? fetchSourceMessagesBatch(sourceSession, mapping.sourcePath, nextBatchUids)
-					: undefined;
-
-			let messages: FetchedMigrationMessage[];
-			try {
-				messages = await currentFetch;
-			} catch {
-				prefetchedBatch = undefined;
-				for (const uid of batchUids) {
-					await processUidWithRetries({
-						db,
-						migrationId,
-						mapping,
-						uid,
-						sourceSession,
-						destClient,
-						transfer,
-						destMessageIds,
-						duplicateLock,
-						backupAccountDir,
-						markMessage,
-						hooks,
-						backupOnly,
-					});
-				}
-				continue;
-			}
-
-			const byUid = new Map(messages.map((m) => [m.uid, m]));
-			for (const uid of batchUids) {
-				if (hooks.shouldStop()) return;
-				await hooks.waitWhilePaused();
-				if (hooks.shouldStop()) return;
-
-				const msg = byUid.get(uid);
-				if (!msg) {
-					await processUidWithRetries({
-						db,
-						migrationId,
-						mapping,
-						uid,
-						sourceSession,
-						destClient,
-						transfer,
-						destMessageIds,
-						duplicateLock,
-						backupAccountDir,
-						markMessage,
-						hooks,
-						backupOnly,
-					});
-					continue;
-				}
-
-				await processFetchedWithRetries({
-					db,
-					migrationId,
-					mapping,
-					msg,
-					destClient,
-					transfer,
-					destMessageIds,
-					duplicateLock,
-					backupAccountDir,
-					markMessage,
-					hooks,
-					backupOnly,
-				});
-			}
-			hooks.onBatchFinished?.();
-			if (INTER_BATCH_PAUSE_MS > 0) {
-				await Bun.sleep(INTER_BATCH_PAUSE_MS);
-			}
-		}
-	} finally {
-		await closeMailSource(sourceSession);
-		if (destClient) await safeCloseImapClient(destClient);
-	}
-}
+type PreparedMessage = {
+	msg: FetchedMigrationMessage;
+	reservedMessageIdKey?: string;
+};
 
 async function sleepRespectingHooks(ms: number, hooks: FolderTransferHooks): Promise<void> {
 	const deadline = Date.now() + ms;
@@ -338,126 +120,506 @@ async function sleepRespectingHooks(ms: number, hooks: FolderTransferHooks): Pro
 	}
 }
 
-async function processFetchedWithRetries(options: {
-	db: Database;
-	migrationId: string;
-	mapping: FolderMapping;
-	msg: FetchedMigrationMessage;
-	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
-	transfer: MigrationTransferConfig;
-	destMessageIds: Set<string>;
-	duplicateLock: ReturnType<typeof createAsyncMutex>;
-	backupAccountDir: string | null;
-	markMessage: MarkMessageFn;
-	hooks: FolderTransferHooks;
-	backupOnly: boolean;
-}): Promise<void> {
-	const { msg, transfer, hooks, markMessage, db, migrationId, mapping } = options;
-	let attempt = 0;
-	while (attempt < transfer.maxRetryAttempts) {
-		if (hooks.shouldStop()) return;
-		await hooks.waitWhilePaused();
-		if (hooks.shouldStop()) return;
+async function prepareMessage(
+	ctx: TransferContext,
+	msg: FetchedMigrationMessage,
+): Promise<PreparedMessage | "skip" | null> {
+	if (ctx.backupOnly) return { msg };
 
-		try {
-			await transferMessage(
-				db,
-				migrationId,
-				mapping,
-				msg,
-				transfer,
-				options.destClient,
-				options.destMessageIds,
-				options.duplicateLock,
-				options.backupAccountDir,
-				markMessage,
-				hooks,
-				options.backupOnly,
+	if (!ctx.transfer.skipDuplicates || !msg.messageId) {
+		return { msg };
+	}
+
+	const key = normalizeMessageId(msg.messageId);
+	const skip = await ctx.duplicateLock.run(async () => {
+		if (ctx.destMessageIds.has(key)) return true;
+		ctx.destMessageIds.add(key);
+		return false;
+	});
+	if (skip) {
+		if (ctx.staging) {
+			await ctx.staging.remove(ctx.mapping.sourcePath, msg.uid);
+		}
+		ctx.markMessage(
+			ctx.db,
+			ctx.migrationId,
+			ctx.mapping.sourcePath,
+			msg.uid,
+			"completed",
+			0,
+			msg.messageId,
+		);
+		ctx.hooks.onMessageCompleted(msg.uid, 0);
+		return "skip";
+	}
+	return { msg, reservedMessageIdKey: key };
+}
+
+async function releaseDuplicateReservation(
+	ctx: TransferContext,
+	key: string | undefined,
+): Promise<void> {
+	if (!key) return;
+	await ctx.duplicateLock.run(async () => {
+		ctx.destMessageIds.delete(key);
+	});
+}
+
+async function finalizeMessage(
+	ctx: TransferContext,
+	msg: FetchedMigrationMessage,
+): Promise<void> {
+	if (ctx.backupAccountDir) {
+		const backupResult = await writeBackupMessage({
+			accountDir: ctx.backupAccountDir,
+			folderPath: ctx.mapping.sourcePath,
+			uid: msg.uid,
+			source: msg.source,
+		});
+		if (backupResult.status === "failed") {
+			logger.warn(
+				"backup",
+				`Backup write failed for ${ctx.mapping.sourcePath} uid ${msg.uid}`,
+				backupResult.error,
 			);
-			return;
-		} catch (error) {
-			attempt += 1;
-			const classification = classifyMigrationError(error);
-			if (!classification.retryable || attempt >= transfer.maxRetryAttempts) {
-				hooks.onMessageFailed(msg.uid);
-				const errMsg = classification.userMessage;
-				markMessage(
-					db,
-					migrationId,
-					mapping.sourcePath,
-					msg.uid,
-					"failed",
-					0,
-					msg.messageId,
-					errMsg,
-					attempt,
-				);
-				logger.error("migration", `Failed UID ${msg.uid} in ${mapping.sourcePath}`, errMsg);
-			} else {
-				const retryAfterMs = computeRetryDelay(attempt, MIGRATION_RETRY_DELAY_DEFAULTS);
-				hooks.onRetry?.(msg.uid, classification, retryAfterMs);
-				await sleepRespectingHooks(retryAfterMs, hooks);
-				if (hooks.shouldStop()) return;
-				hooks.afterRetryWait?.();
-			}
 		}
 	}
 
-	hooks.onMessageFailed(msg.uid);
-	markMessage(
-		db,
-		migrationId,
-		mapping.sourcePath,
+	const size = msg.source.byteLength;
+	ctx.markMessage(
+		ctx.db,
+		ctx.migrationId,
+		ctx.mapping.sourcePath,
+		msg.uid,
+		"completed",
+		size,
+		msg.messageId,
+		undefined,
+		0,
+		null,
+	);
+	if (ctx.staging) {
+		await ctx.staging.remove(ctx.mapping.sourcePath, msg.uid);
+	}
+	ctx.hooks.onMessageCompleted(msg.uid, size);
+}
+
+async function persistToStaging(
+	ctx: TransferContext,
+	msg: FetchedMigrationMessage,
+): Promise<void> {
+	if (!ctx.staging) return;
+	const meta = await ctx.staging.write(ctx.mapping.sourcePath, msg);
+	ctx.markMessage(
+		ctx.db,
+		ctx.migrationId,
+		ctx.mapping.sourcePath,
+		msg.uid,
+		"staged",
+		meta.sizeBytes,
+		msg.messageId,
+		undefined,
+		0,
+		meta.sha256,
+	);
+}
+
+async function transferBackupOnly(ctx: TransferContext, msg: FetchedMigrationMessage): Promise<void> {
+	if (!ctx.backupAccountDir) {
+		throw new Error("Backup folder is not configured.");
+	}
+	const backupResult = await writeBackupMessage({
+		accountDir: ctx.backupAccountDir,
+		folderPath: ctx.mapping.sourcePath,
+		uid: msg.uid,
+		source: msg.source,
+	});
+	if (backupResult.status === "failed") {
+		throw new Error(backupResult.error);
+	}
+	await finalizeMessage(ctx, msg);
+}
+
+async function commitPreparedBatch(
+	ctx: TransferContext,
+	prepared: PreparedMessage[],
+): Promise<void> {
+	if (prepared.length === 0) return;
+
+	if (ctx.backupOnly) {
+		for (const item of prepared) {
+			await transferBackupOnly(ctx, item.msg);
+		}
+		return;
+	}
+
+	const payloads = prepared.map((item) =>
+		toAppendPayload(item.msg, ctx.transfer.preserveFlags),
+	);
+
+	try {
+		await ctx.sharedDest!.appendBatch(ctx.mapping.destPath, payloads);
+	} catch (error) {
+		for (const item of prepared) {
+			await releaseDuplicateReservation(ctx, item.reservedMessageIdKey);
+		}
+		throw error;
+	}
+
+	for (const item of prepared) {
+		await finalizeMessage(ctx, item.msg);
+	}
+}
+
+function markMessageFailed(
+	ctx: TransferContext,
+	msg: FetchedMigrationMessage,
+	errMsg: string,
+	attempt: number,
+): void {
+	ctx.hooks.onMessageFailed(msg.uid);
+	ctx.markMessage(
+		ctx.db,
+		ctx.migrationId,
+		ctx.mapping.sourcePath,
 		msg.uid,
 		"failed",
 		0,
 		msg.messageId,
-		"Could not move this message after several tries",
-		transfer.maxRetryAttempts,
+		errMsg,
+		attempt,
 	);
-	logger.error(
-		"migration",
-		`Gave up UID ${msg.uid} in ${mapping.sourcePath} after ${transfer.maxRetryAttempts} attempts`,
+	logger.error("migration", `Failed UID ${msg.uid} in ${ctx.mapping.sourcePath}`, errMsg);
+}
+
+async function transferSingleWithRetries(
+	ctx: TransferContext,
+	msg: FetchedMigrationMessage,
+): Promise<void> {
+	let attempt = 0;
+	while (attempt < ctx.transfer.maxRetryAttempts) {
+		if (ctx.hooks.shouldStop()) return;
+		await ctx.hooks.waitWhilePaused();
+		if (ctx.hooks.shouldStop()) return;
+
+		const prepared = await prepareMessage(ctx, msg);
+		if (prepared === "skip" || prepared === null) return;
+
+		try {
+			if (ctx.backupOnly) {
+				await transferBackupOnly(ctx, prepared.msg);
+			} else {
+				await ctx.sharedDest!.appendBatch(ctx.mapping.destPath, [
+					toAppendPayload(prepared.msg, ctx.transfer.preserveFlags),
+				]);
+				await finalizeMessage(ctx, prepared.msg);
+			}
+			return;
+		} catch (error) {
+			await releaseDuplicateReservation(ctx, prepared.reservedMessageIdKey);
+			attempt += 1;
+			const classification = classifyMigrationError(error);
+			if (!classification.retryable || attempt >= ctx.transfer.maxRetryAttempts) {
+				markMessageFailed(ctx, msg, classification.userMessage, attempt);
+				return;
+			}
+			const retryAfterMs = computeRetryDelay(attempt, ctx.transfer.retryDelayDefaults);
+			ctx.hooks.onRetry?.(msg.uid, classification, retryAfterMs);
+			await sleepRespectingHooks(retryAfterMs, ctx.hooks);
+			if (ctx.hooks.shouldStop()) return;
+			ctx.hooks.afterRetryWait?.();
+		}
+	}
+
+	markMessageFailed(
+		ctx,
+		msg,
+		"Could not move this message after several tries",
+		ctx.transfer.maxRetryAttempts,
 	);
 }
 
-async function processUidWithRetries(options: {
-	db: Database;
-	migrationId: string;
-	mapping: FolderMapping;
+async function transferBatchWithRetries(
+	ctx: TransferContext,
+	messages: FetchedMigrationMessage[],
+): Promise<void> {
+	if (messages.length === 0) return;
+
+	let attempt = 0;
+	while (attempt < ctx.transfer.maxRetryAttempts) {
+		if (ctx.hooks.shouldStop()) return;
+		await ctx.hooks.waitWhilePaused();
+		if (ctx.hooks.shouldStop()) return;
+
+		const prepared: PreparedMessage[] = [];
+		for (const msg of messages) {
+			const item = await prepareMessage(ctx, msg);
+			if (item === "skip" || item === null) continue;
+			prepared.push(item);
+		}
+
+		if (prepared.length === 0) return;
+
+		try {
+			await commitPreparedBatch(ctx, prepared);
+			return;
+		} catch (error) {
+			for (const item of prepared) {
+				await releaseDuplicateReservation(ctx, item.reservedMessageIdKey);
+			}
+			attempt += 1;
+			const classification = classifyMigrationError(error);
+			if (!classification.retryable || attempt >= ctx.transfer.maxRetryAttempts) {
+				for (const item of prepared) {
+					markMessageFailed(ctx, item.msg, classification.userMessage, attempt);
+				}
+				return;
+			}
+			const retryAfterMs = computeRetryDelay(attempt, ctx.transfer.retryDelayDefaults);
+			for (const item of prepared) {
+				ctx.hooks.onRetry?.(item.msg.uid, classification, retryAfterMs);
+			}
+			await sleepRespectingHooks(retryAfterMs, ctx.hooks);
+			if (ctx.hooks.shouldStop()) return;
+			ctx.hooks.afterRetryWait?.();
+		}
+	}
+
+	for (const msg of messages) {
+		await transferSingleWithRetries(ctx, msg);
+	}
+}
+
+async function runUploadWorker(
+	ctx: TransferContext,
+	staging: MigrationStagingStore,
+	queue: TransferBatchQueue<number[]>,
+): Promise<void> {
+	while (true) {
+		const uidBatch = await queue.take();
+		if (!uidBatch) break;
+		if (ctx.hooks.shouldStop()) continue;
+
+		const messages: FetchedMigrationMessage[] = [];
+		const reads = await Promise.all(
+			uidBatch.map(async (uid) => {
+				try {
+					const msg = await staging.read(ctx.mapping.sourcePath, uid);
+					return { uid, msg, error: null as string | null };
+				} catch (error) {
+					return {
+						uid,
+						msg: null,
+						error: error instanceof Error ? error.message : "Staged file corrupt — will retry",
+					};
+				}
+			}),
+		);
+		for (const row of reads) {
+			if (row.msg) {
+				messages.push(row.msg);
+				continue;
+			}
+			ctx.hooks.onMessageFailed(row.uid);
+			ctx.markMessage(
+				ctx.db,
+				ctx.migrationId,
+				ctx.mapping.sourcePath,
+				row.uid,
+				"failed",
+				0,
+				undefined,
+				row.error ?? "Staged file missing — will retry",
+			);
+		}
+		if (messages.length > 0) {
+			await transferBatchWithRetries(ctx, messages);
+		}
+		ctx.hooks.onBatchFinished?.();
+	}
+}
+
+async function runStageLane(options: {
+	ctx: TransferContext;
+	uids: number[];
+	uploadQueue: TransferBatchQueue<number[]>;
+}): Promise<void> {
+	const { ctx, uids, uploadQueue } = options;
+	const { resilientSource } = ctx;
+	const batchSize = ctx.transfer.fetchBatchSize;
+	let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
+	for (let i = 0; i < uids.length; i += batchSize) {
+		if (ctx.hooks.shouldStop()) return;
+		await ctx.hooks.waitWhilePaused();
+		if (ctx.hooks.shouldStop()) return;
+
+		const batchUids = uids.slice(i, i + batchSize);
+		const nextBatchUids = uids.slice(i + batchSize, i + 2 * batchSize);
+		const currentFetch =
+			prefetchedBatch ??
+			resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, batchUids);
+		prefetchedBatch =
+			nextBatchUids.length > 0
+				? resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, nextBatchUids)
+				: undefined;
+
+		let messages: FetchedMigrationMessage[];
+		try {
+			messages = await currentFetch;
+		} catch {
+			prefetchedBatch = undefined;
+			for (const uid of batchUids) {
+				await stageSingleUid({ ctx, uid, uploadQueue });
+			}
+			continue;
+		}
+
+		const byUid = new Map(messages.map((m) => [m.uid, m]));
+		const stagedUids: number[] = [];
+
+		for (const uid of batchUids) {
+			const msg = byUid.get(uid);
+			if (!msg) {
+				await stageSingleUid({ ctx, uid, uploadQueue });
+				continue;
+			}
+			await persistToStaging(ctx, msg);
+			stagedUids.push(uid);
+		}
+
+		if (stagedUids.length > 0) {
+			await uploadQueue.push(stagedUids);
+		}
+
+		if (ctx.transfer.interBatchPauseMs > 0) {
+			await Bun.sleep(ctx.transfer.interBatchPauseMs);
+		}
+	}
+}
+
+async function stageSingleUid(options: {
+	ctx: TransferContext;
 	uid: number;
-	sourceSession: MailSourceSession;
-	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
-	transfer: MigrationTransferConfig;
-	destMessageIds: Set<string>;
-	duplicateLock: ReturnType<typeof createAsyncMutex>;
-	backupAccountDir: string | null;
-	markMessage: MarkMessageFn;
-	hooks: FolderTransferHooks;
-	backupOnly: boolean;
+	uploadQueue: TransferBatchQueue<number[]>;
+}): Promise<void> {
+	const { ctx, uid, uploadQueue } = options;
+	let msg: FetchedMigrationMessage | undefined;
+	for (let fetchAttempt = 0; fetchAttempt < 12; fetchAttempt++) {
+		if (ctx.hooks.shouldStop()) return;
+		await ctx.hooks.waitWhilePaused();
+		if (ctx.hooks.shouldStop()) return;
+
+		const batch = await ctx.resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, [uid]);
+		msg = batch[0];
+		if (msg) break;
+		await sleepRespectingHooks(400 + fetchAttempt * 200, ctx.hooks);
+	}
+	if (!msg) {
+		ctx.hooks.onMessageFailed(uid);
+		ctx.markMessage(
+			ctx.db,
+			ctx.migrationId,
+			ctx.mapping.sourcePath,
+			uid,
+			"failed",
+			0,
+			undefined,
+			`Message UID ${uid} could not be read — will retry`,
+		);
+		return;
+	}
+	await persistToStaging(ctx, msg);
+	await uploadQueue.push([uid]);
+}
+
+async function runFetchLane(options: {
+	ctx: TransferContext;
+	uids: number[];
+	queue: TransferBatchQueue<FetchedMigrationMessage[]>;
+}): Promise<void> {
+	const { ctx, uids, queue } = options;
+	const { resilientSource } = ctx;
+	const batchSize = ctx.transfer.fetchBatchSize;
+	let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
+	for (let i = 0; i < uids.length; i += batchSize) {
+		if (ctx.hooks.shouldStop()) return;
+		await ctx.hooks.waitWhilePaused();
+		if (ctx.hooks.shouldStop()) return;
+
+		const batchUids = uids.slice(i, i + batchSize);
+		const nextBatchUids = uids.slice(i + batchSize, i + 2 * batchSize);
+		const currentFetch =
+			prefetchedBatch ??
+			resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, batchUids);
+		prefetchedBatch =
+			nextBatchUids.length > 0
+				? resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, nextBatchUids)
+				: undefined;
+
+		let messages: FetchedMigrationMessage[];
+		try {
+			messages = await currentFetch;
+		} catch {
+			prefetchedBatch = undefined;
+			for (const uid of batchUids) {
+				await processUidWithRetries({ ctx, uid });
+			}
+			continue;
+		}
+
+		const byUid = new Map(messages.map((m) => [m.uid, m]));
+		const fetched: FetchedMigrationMessage[] = [];
+		const missingUids: number[] = [];
+
+		for (const uid of batchUids) {
+			const msg = byUid.get(uid);
+			if (msg) fetched.push(msg);
+			else missingUids.push(uid);
+		}
+
+		if (fetched.length > 0) {
+			await queue.push(fetched);
+		}
+
+		for (const uid of missingUids) {
+			if (ctx.hooks.shouldStop()) return;
+			await ctx.hooks.waitWhilePaused();
+			if (ctx.hooks.shouldStop()) return;
+			await processUidWithRetries({ ctx, uid });
+		}
+
+		if (ctx.transfer.interBatchPauseMs > 0) {
+			await Bun.sleep(ctx.transfer.interBatchPauseMs);
+		}
+	}
+}
+
+async function processUidWithRetries(options: {
+	ctx: TransferContext;
+	uid: number;
+	uploadQueue?: TransferBatchQueue<number[]>;
 }): Promise<void> {
 	let msg: FetchedMigrationMessage | undefined;
 	for (let fetchAttempt = 0; fetchAttempt < 12; fetchAttempt++) {
-		if (options.hooks.shouldStop()) return;
-		await options.hooks.waitWhilePaused();
-		if (options.hooks.shouldStop()) return;
+		if (options.ctx.hooks.shouldStop()) return;
+		await options.ctx.hooks.waitWhilePaused();
+		if (options.ctx.hooks.shouldStop()) return;
 
-		const batch = await fetchSourceMessagesBatch(
-			options.sourceSession,
-			options.mapping.sourcePath,
+		const batch = await options.ctx.resilientSource.fetchMessagesBatch(
+			options.ctx.mapping.sourcePath,
 			[options.uid],
 		);
 		msg = batch[0];
 		if (msg) break;
-		await sleepRespectingHooks(400 + fetchAttempt * 200, options.hooks);
-		if (options.hooks.shouldStop()) return;
+		await sleepRespectingHooks(400 + fetchAttempt * 200, options.ctx.hooks);
+		if (options.ctx.hooks.shouldStop()) return;
 	}
 	if (!msg) {
-		options.hooks.onMessageFailed(options.uid);
-		options.markMessage(
-			options.db,
-			options.migrationId,
-			options.mapping.sourcePath,
+		options.ctx.hooks.onMessageFailed(options.uid);
+		options.ctx.markMessage(
+			options.ctx.db,
+			options.ctx.migrationId,
+			options.ctx.mapping.sourcePath,
 			options.uid,
 			"failed",
 			0,
@@ -466,33 +628,197 @@ async function processUidWithRetries(options: {
 		);
 		return;
 	}
-	await processFetchedWithRetries({
-		db: options.db,
-		migrationId: options.migrationId,
-		mapping: options.mapping,
-		msg,
-		destClient: options.destClient,
-		transfer: options.transfer,
-		destMessageIds: options.destMessageIds,
-		duplicateLock: options.duplicateLock,
-		backupAccountDir: options.backupAccountDir,
-		markMessage: options.markMessage,
-		hooks: options.hooks,
-		backupOnly: options.backupOnly,
-	});
+	if (options.ctx.staging) {
+		await persistToStaging(options.ctx, msg);
+		await options.uploadQueue!.push([options.uid]);
+		return;
+	}
+	await transferSingleWithRetries(options.ctx, msg);
+}
+
+function emptyFetchedMessage(uid: number, messageId?: string): FetchedMigrationMessage {
+	return {
+		uid,
+		source: Buffer.alloc(0),
+		flags: new Set(),
+		messageId,
+	};
+}
+
+async function finalizeCopiedUid(ctx: TransferContext, uid: number, messageId?: string): Promise<void> {
+	ctx.markMessage(
+		ctx.db,
+		ctx.migrationId,
+		ctx.mapping.sourcePath,
+		uid,
+		"completed",
+		0,
+		messageId,
+		undefined,
+		0,
+		null,
+	);
+	ctx.hooks.onMessageCompleted(uid, 0);
+}
+
+async function transferFolderServerCopy(
+	ctx: TransferContext,
+	pendingUids: number[],
+): Promise<void> {
+	const batchSize = ctx.transfer.fetchBatchSize;
+	for (let i = 0; i < pendingUids.length; i += batchSize) {
+		if (ctx.hooks.shouldStop()) return;
+		await ctx.hooks.waitWhilePaused();
+		if (ctx.hooks.shouldStop()) return;
+
+		const batchUids = pendingUids.slice(i, i + batchSize);
+		const envelopes = await ctx.resilientSource.runImap((client) =>
+			fetchEnvelopeBatch(client, ctx.mapping.sourcePath, batchUids),
+		);
+
+		const toCopy: number[] = [];
+		for (const env of envelopes) {
+			const prepared = await prepareMessage(ctx, emptyFetchedMessage(env.uid, env.messageId));
+			if (prepared === "skip" || prepared === null) continue;
+			toCopy.push(env.uid);
+		}
+
+		if (toCopy.length === 0) continue;
+
+		try {
+			await ctx.resilientSource.runImap((client) =>
+				copyMessagesUidBatch(
+					client,
+					ctx.mapping.sourcePath,
+					ctx.mapping.destPath,
+					toCopy,
+				),
+			);
+			for (const env of envelopes) {
+				if (!toCopy.includes(env.uid)) continue;
+				await finalizeCopiedUid(ctx, env.uid, env.messageId);
+			}
+		} catch (error) {
+			logger.warn(
+				"migration",
+				`Server-side COPY batch failed in ${ctx.mapping.sourcePath}, falling back per UID`,
+				error instanceof Error ? error.message : String(error),
+			);
+			for (const uid of toCopy) {
+				if (ctx.hooks.shouldStop()) return;
+				try {
+					await ctx.resilientSource.runImap((client) =>
+						copyMessagesUidBatch(client, ctx.mapping.sourcePath, ctx.mapping.destPath, [uid]),
+					);
+					const env = envelopes.find((e) => e.uid === uid);
+					await finalizeCopiedUid(ctx, uid, env?.messageId);
+				} catch {
+					await processUidWithRetries({ ctx, uid });
+				}
+			}
+		}
+
+		if (ctx.transfer.interBatchPauseMs > 0) {
+			await Bun.sleep(ctx.transfer.interBatchPauseMs);
+		}
+		ctx.hooks.onBatchFinished?.();
+	}
+}
+
+async function transferFolderTurboStaging(ctx: TransferContext, pendingUids: number[]): Promise<void> {
+	const staging = ctx.staging!;
+	const phase = ctx.transferPhase;
+	const resumeStaged = listStagedUidsForFolder(ctx.migrationId, ctx.mapping.sourcePath);
+	const resumeSet = new Set(resumeStaged);
+	const fetchUids = pendingUids.filter((uid) => !resumeSet.has(uid));
+
+	logger.info(
+		"migration",
+		`Turbo ${phase} ${ctx.mapping.sourcePath}: ${fetchUids.length} fetch, ${resumeStaged.length} staged upload`,
+	);
+
+	if (phase === "deliver") {
+		const uploadQueue = new TransferBatchQueue<number[]>(ctx.transfer.pipelineQueueDepth);
+		const uploadWorker = runUploadWorker(ctx, staging, uploadQueue);
+		const batchSize = ctx.transfer.fetchBatchSize;
+		const stagedToDeliver = stagedUidsForDeliver(
+			ctx,
+			resumeStaged.length > 0 ? resumeStaged : pendingUids,
+		);
+		for (let i = 0; i < stagedToDeliver.length; i += batchSize) {
+			const batch = stagedToDeliver.slice(i, i + batchSize);
+			if (batch.length > 0) await uploadQueue.push(batch);
+		}
+		uploadQueue.close();
+		await uploadWorker;
+		return;
+	}
+
+	if (phase === "ingest") {
+		const noopQueue = new TransferBatchQueue<number[]>(1);
+		await runStageLane({ ctx, uids: fetchUids, uploadQueue: noopQueue });
+		noopQueue.close();
+		return;
+	}
+
+	const uploadQueue = new TransferBatchQueue<number[]>(ctx.transfer.pipelineQueueDepth);
+	const uploadWorker = runUploadWorker(ctx, staging, uploadQueue);
+
+	const batchSize = ctx.transfer.fetchBatchSize;
+	const stagedToDeliver = stagedUidsForDeliver(ctx, resumeStaged);
+	for (let i = 0; i < stagedToDeliver.length; i += batchSize) {
+		const batch = stagedToDeliver.slice(i, i + batchSize);
+		if (batch.length > 0) await uploadQueue.push(batch);
+	}
+
+	await runStageLane({ ctx, uids: fetchUids, uploadQueue });
+	uploadQueue.close();
+	await uploadWorker;
+}
+
+async function transferFolderCoupled(ctx: TransferContext, pendingUids: number[]): Promise<void> {
+	if (ctx.transferPhase === "deliver") return;
+
+	const queue = new TransferBatchQueue<FetchedMigrationMessage[]>(
+		ctx.transfer.pipelineQueueDepth,
+	);
+	const appendWorker =
+		ctx.transferPhase === "ingest"
+			? Promise.resolve()
+			: runUploadWorkerCoupled(ctx, queue);
+
+	await runFetchLane({ ctx, uids: pendingUids, queue });
+
+	queue.close();
+	await appendWorker;
+}
+
+async function runUploadWorkerCoupled(
+	ctx: TransferContext,
+	queue: TransferBatchQueue<FetchedMigrationMessage[]>,
+): Promise<void> {
+	while (true) {
+		const batch = await queue.take();
+		if (!batch) break;
+		if (ctx.hooks.shouldStop()) continue;
+		await transferBatchWithRetries(ctx, batch);
+		ctx.hooks.onBatchFinished?.();
+	}
 }
 
 export async function transferFolderWithLanes(options: {
 	db: Database;
 	migrationId: string;
 	mapping: FolderMapping;
-	sourceCreds: MailboxCredentials;
-	destCreds: MailboxCredentials;
-	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
+	resilientSource: ResilientMailSource;
+	/** One appender per migration — serializes APPEND across all folders. */
+	sharedDest: SharedDestAppender | null;
 	pendingUids: number[];
 	transfer: MigrationTransferConfig;
 	backupRootPath: string | null;
 	backupOnly: boolean;
+	useServerSideCopy: boolean;
+	transferPhase?: FolderTransferPhase;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
@@ -500,43 +826,62 @@ export async function transferFolderWithLanes(options: {
 		db,
 		migrationId,
 		mapping,
-		sourceCreds,
-		destCreds,
-		destClient,
+		resilientSource,
 		pendingUids,
 		transfer,
 		backupRootPath: backupAccountDir,
 		backupOnly,
+		useServerSideCopy,
+		transferPhase = "combined",
 		markMessage,
 		hooks,
+		sharedDest,
 	} = options;
 
 	if (pendingUids.length === 0) return;
 
 	const destMessageIds =
-		!backupOnly && transfer.skipDuplicates && destClient
-			? await buildDestinationMessageIdIndex(destClient, mapping.destPath)
+		sharedDest && transfer.skipDuplicates
+			? await resolveDestinationDuplicateIds({
+					client: sharedDest.imapClient,
+					folderPath: mapping.destPath,
+					fetchBatchSize: transfer.fetchBatchSize,
+					db,
+					migrationId,
+					sourceFolder: mapping.sourcePath,
+				})
 			: new Set<string>();
-	const duplicateLock = createAsyncMutex();
-	const shards = shardUids(pendingUids, transfer.parallelConnections);
 
-	await Promise.all(
-		shards.map((uids) =>
-			runMigrationLane({
-				db,
-				migrationId,
-				mapping,
-				sourceCreds,
-				destCreds,
-				uids,
-				transfer,
-				destMessageIds,
-				duplicateLock,
-				backupAccountDir,
-				backupOnly,
-				markMessage,
-				hooks,
-			}),
-		),
-	);
+	const staging = backupOnly
+		? null
+		: new MigrationStagingStore(migrationStagingRoot(migrationId));
+
+	const ctx: TransferContext = {
+		db,
+		migrationId,
+		mapping,
+		transfer,
+		destMessageIds,
+		duplicateLock: createAsyncMutex(),
+		backupAccountDir,
+		markMessage,
+		hooks,
+		backupOnly,
+		sharedDest,
+		staging,
+		resilientSource,
+		useServerSideCopy,
+		transferPhase,
+	};
+
+	if (useServerSideCopy && transferPhase !== "deliver") {
+		await transferFolderServerCopy(ctx, pendingUids);
+		return;
+	}
+
+	if (staging) {
+		await transferFolderTurboStaging(ctx, pendingUids);
+	} else {
+		await transferFolderCoupled(ctx, pendingUids);
+	}
 }

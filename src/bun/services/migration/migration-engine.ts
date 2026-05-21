@@ -20,6 +20,7 @@ import {
 	getMigrationById,
 	getMigrationProgressSnapshot,
 	incrementMigrationCounters,
+	listStagedUidsForFolder,
 	markFolderCompleted,
 	markMigrationMessage,
 	markMissingFolderMessagesFailed,
@@ -36,6 +37,8 @@ import {
 	describeCompletionSummary,
 	describeFinishingRemainingActivity,
 	describeRetryActivity,
+	describeDeliverActivity,
+	describeIngestActivity,
 	describeScanningActivity,
 	describeTransferActivity,
 	getTransferConfig,
@@ -67,13 +70,17 @@ import {
 	safeCloseImapClient,
 	ensureFolderExists,
 } from "../imap/imap-client";
-import {
-	closeMailSource,
-	fetchSourceFolderUids,
-	openMailSource,
-} from "../mail/mail-source";
-import { transferFolderWithLanes } from "./migration-lanes";
+import { startImapKeepalive } from "../imap/imap-keepalive";
+import { canUseServerSideCopy } from "../imap/imap-same-host";
+import { openMailSource } from "../mail/mail-source";
+import { ResilientMailSource } from "../mail/resilient-mail-source";
+import { transferFolderWithLanes, type FolderTransferPhase } from "./migration-lanes";
 import type { MigrationErrorClassification } from "./migration-errors";
+import {
+	resolveMigrationProviderProfile,
+	type MigrationProviderProfile,
+} from "./migration-provider-profile";
+import { SharedDestAppender } from "./shared-dest-appender";
 import { logger } from "../../utils/logger";
 
 export type ProgressEmitter = (progress: MigrationProgress) => void;
@@ -140,6 +147,7 @@ interface MigrationContext {
 	cancelled: boolean;
 	paused: boolean;
 	autopilot: MigrationAutopilotState;
+	profile: MigrationProviderProfile;
 	plannedSecondsTypical?: number;
 }
 
@@ -313,6 +321,14 @@ export async function executeMigration(
 		);
 	}
 
+	const db = getDatabase();
+	const backupOnly = payload.jobType === "backup";
+	const profile = resolveMigrationProviderProfile(
+		payload.source,
+		payload.destination,
+		backupOnly,
+	);
+
 	const ctx: MigrationContext = {
 		migrationId,
 		jobType: payload.jobType,
@@ -322,16 +338,15 @@ export async function executeMigration(
 		backupRootPath: payload.backupRootPath,
 		cancelled: false,
 		paused: false,
-		autopilot: createAutopilotState(),
+		autopilot: createAutopilotState(profile),
+		profile,
 		plannedSecondsTypical: pendingPlannedSeconds.get(migrationId),
 	};
 	pendingPlannedSeconds.delete(migrationId);
 
 	activeMigrations.set(migrationId, ctx);
 
-	const db = getDatabase();
 	const { source, destination, folderMappings: selectedMappings } = ctx;
-	const backupOnly = ctx.jobType === "backup";
 
 	if (backupOnly) {
 		await verifySourceMailbox(source);
@@ -339,8 +354,28 @@ export async function executeMigration(
 		await verifyMigrationMailboxes(source, destination);
 	}
 
-	const sourceSession = await openMailSource(source);
 	const destClient = backupOnly ? null : await connectImapClient(destination);
+	const sharedDestAppender =
+		destClient != null ? new SharedDestAppender(destClient, destination) : null;
+
+	const rawSourceSession = await openMailSource(source);
+	const resilientSource = new ResilientMailSource(source, rawSourceSession);
+	const useServerSideCopy = canUseServerSideCopy(source, destination, backupOnly);
+	const stopSourceKeepalive = startImapKeepalive(
+		() =>
+			resilientSource.current.protocol === "imap"
+				? resilientSource.current.client
+				: null,
+	);
+	const stopDestKeepalive = destClient
+		? startImapKeepalive(() => destClient)
+		: () => undefined;
+
+	logger.info(
+		"migration",
+		`Transfer profile ${profile.id} (single source session, batch ${profile.fetchBatchSize}${useServerSideCopy ? ", server COPY" : ""}${backupOnly ? "" : ", rolling pipeline"})`,
+		migrationId,
+	);
 
 	try {
 
@@ -466,8 +501,40 @@ export async function executeMigration(
 			},
 		});
 
-		for (const mapping of selectedMappings) {
-			if (ctx.cancelled) break;
+		const resolvePendingUids = (
+			mapping: FolderMapping,
+			allUids: number[],
+			phase: FolderTransferPhase,
+		): number[] => {
+			if (phase === "deliver") {
+				return listStagedUidsForFolder(migrationId, mapping.sourcePath);
+			}
+			return allUids.filter((uid) => {
+				const existing = db
+					.query(
+						`SELECT status FROM migration_messages
+             WHERE migration_id = ?
+               AND (source_folder_hash = ? OR source_folder = ?)
+               AND source_uid = ?`,
+					)
+					.get(
+						migrationId,
+						hashString(`migration-message-folder:${migrationId}`, mapping.sourcePath),
+						mapping.sourcePath,
+						uid,
+					) as { status: string } | null;
+				if (!existing) return true;
+				if (existing.status === "failed") return false;
+				if (existing.status === "completed" || existing.status === "staged") return false;
+				return true;
+			});
+		};
+
+		const processMappingFolder = async (
+			mapping: FolderMapping,
+			transferPhase: FolderTransferPhase,
+		): Promise<void> => {
+			if (ctx.cancelled) return;
 
 			folderPass: while (true) {
 				while (ctx.paused) {
@@ -517,54 +584,68 @@ export async function executeMigration(
 				mapping.sourcePath,
 			);
 
-			const uids = await fetchSourceFolderUids(sourceSession, mapping.sourcePath);
-			live.messagesTotal = updateFolderScannedTotal(
-				migrationId,
-				mapping.sourcePath,
-				uids.length,
-			);
+			const uids =
+				transferPhase === "deliver"
+					? []
+					: await resilientSource.fetchFolderUids(mapping.sourcePath);
+			if (transferPhase !== "deliver") {
+				live.messagesTotal = updateFolderScannedTotal(
+					migrationId,
+					mapping.sourcePath,
+					uids.length,
+				);
+			}
 
-			const pendingUids = uids.filter((uid) => {
-				const existing = db
-					.query(
-						`SELECT status FROM migration_messages
-             WHERE migration_id = ?
-               AND (source_folder_hash = ? OR source_folder = ?)
-               AND source_uid = ?`,
-					)
-					.get(
+			const pendingUids = resolvePendingUids(mapping, uids, transferPhase);
+			if (pendingUids.length === 0) {
+				if (transferPhase === "deliver") {
+					const folderUidsForAudit = await resilientSource.fetchFolderUids(mapping.sourcePath);
+					markMissingFolderMessagesFailed(
 						migrationId,
-						hashString(`migration-message-folder:${migrationId}`, mapping.sourcePath),
 						mapping.sourcePath,
-						uid,
-					) as { status: string } | null;
-				if (!existing) return true;
-				if (existing.status === "failed") return false;
-				return existing.status !== "completed";
-			});
+						folderUidsForAudit,
+					);
+					markFolderCompleted(migrationId, mapping.sourcePath);
+					live.foldersCompleted += 1;
+				}
+				break folderPass;
+			}
+
+			const activityPhase =
+				transferPhase === "ingest"
+					? "ingesting"
+					: transferPhase === "deliver"
+						? "delivering"
+						: "transferring";
+			const activityLabel =
+				transferPhase === "ingest"
+					? describeIngestActivity(mapping.sourcePath)
+					: transferPhase === "deliver"
+						? describeDeliverActivity(mapping.sourcePath)
+						: describeTransferActivity(mapping.sourcePath);
 
 			emitLiveProgress(emit, ctx, live, {
 				currentFolder: mapping.sourcePath,
-				activityPhase: "transferring",
-				activityLabel: describeTransferActivity(mapping.sourcePath),
+				activityPhase,
+				activityLabel,
 			});
 
 			await transferFolderWithLanes({
 				db,
 				migrationId,
 				mapping,
-				sourceCreds: source,
-				destCreds: destination,
-				destClient,
+				resilientSource,
+				sharedDest: sharedDestAppender,
 				pendingUids,
 				transfer: getTransferConfig(ctx.autopilot),
 				backupRootPath: ctx.backupRootPath,
 				backupOnly,
+				useServerSideCopy,
+				transferPhase,
 				markMessage: markMigrationMessage,
 				hooks: transferHooks(mapping),
 			});
 
-			markMissingFolderMessagesFailed(migrationId, mapping.sourcePath, uids);
 			syncMigrationCounters(migrationId);
 			const midFolder = getMigrationProgressSnapshot(migrationId, "running", undefined, {
 				reconcile: true,
@@ -575,8 +656,8 @@ export async function executeMigration(
 				live.messagesTotal = midFolder.messagesTotal;
 				emitLiveProgress(emit, ctx, live, {
 					currentFolder: mapping.sourcePath,
-					activityPhase: "transferring",
-					activityLabel: describeTransferActivity(mapping.sourcePath),
+					activityPhase,
+					activityLabel,
 				});
 			}
 
@@ -588,6 +669,16 @@ export async function executeMigration(
 				continue folderPass;
 			}
 			if (ctx.cancelled) break folderPass;
+
+			if (transferPhase === "ingest") {
+				break folderPass;
+			}
+
+			const folderUidsForAudit =
+				uids.length > 0
+					? uids
+					: await resilientSource.fetchFolderUids(mapping.sourcePath);
+			markMissingFolderMessagesFailed(migrationId, mapping.sourcePath, folderUidsForAudit);
 
 			markFolderCompleted(migrationId, mapping.sourcePath);
 			live.foldersCompleted += 1;
@@ -615,6 +706,42 @@ export async function executeMigration(
 				);
 			}
 				break folderPass;
+			}
+		};
+
+		const useRollingPipeline = !backupOnly && !useServerSideCopy;
+
+		if (useRollingPipeline) {
+			let deliverChain = Promise.resolve();
+			for (const mapping of selectedMappings) {
+				if (ctx.cancelled) break;
+				emitLiveProgress(emit, ctx, live, {
+					activityPhase: "ingesting",
+					activityLabel: describeIngestActivity(mapping.sourcePath),
+					currentFolder: mapping.sourcePath,
+				});
+				await processMappingFolder(mapping, "ingest");
+				if (ctx.cancelled) break;
+				const deliverMapping = mapping;
+				deliverChain = deliverChain.then(async () => {
+					if (ctx.cancelled) return;
+					emitLiveProgress(emit, ctx, live, {
+						activityPhase: "delivering",
+						activityLabel: describeDeliverActivity(deliverMapping.sourcePath),
+						currentFolder: deliverMapping.sourcePath,
+					});
+					await processMappingFolder(deliverMapping, "deliver");
+				});
+			}
+			await deliverChain;
+		} else {
+			const folderPhases: FolderTransferPhase[] = ["combined"];
+			for (const phase of folderPhases) {
+				if (ctx.cancelled) break;
+				for (const mapping of selectedMappings) {
+					if (ctx.cancelled) break;
+					await processMappingFolder(mapping, phase);
+				}
 			}
 		}
 
@@ -644,9 +771,9 @@ export async function executeMigration(
 					db,
 					migrationId,
 					mappings: selectedMappings,
-					source,
-					destination,
-					destClient,
+					resilientSource,
+					sharedDest: sharedDestAppender,
+					useServerSideCopy,
 					transfer: getTransferConfig(ctx.autopilot),
 					backupRootPath: ctx.backupRootPath,
 					backupOnly,
@@ -734,7 +861,9 @@ export async function executeMigration(
 	} finally {
 		activeMigrations.delete(migrationId);
 		activeMigrationSlots.delete(migrationId);
-		await closeMailSource(sourceSession);
+		stopSourceKeepalive();
+		stopDestKeepalive();
+		await resilientSource.close();
 		if (destClient) await safeCloseImapClient(destClient);
 	}
 }

@@ -14,6 +14,8 @@ export const MIGRATION_COPY = {
 		connecting: "Connected — starting your move…",
 		warmingSubline: "Picking up where we left off…",
 		reconnectingSubline: "Reconnecting to your migration…",
+		ingestPhase: "Saving your mail locally first…",
+		deliverPhase: "Uploading saved mail to your new mailbox…",
 	},
 
 	userPaused: {

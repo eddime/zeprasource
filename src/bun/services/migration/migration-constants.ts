@@ -1,17 +1,12 @@
 /**
  * IMAP migration tuning — one place for throughput vs. reliability tradeoffs.
  *
- * Provider reference (per mailbox account, approximate):
- * - Gmail / Google Workspace: ~15 concurrent IMAP sessions
- * - Microsoft 365 / Outlook: ~15–20 (plus opaque “request throttled” budgets)
- * - Yahoo, iCloud, Fastmail: often ~10–15
- * - Shared hosting (DreamHost, IONOS, Hostinger, …): often stricter; 4–8 sessions
+ * Each migration holds **one** reused source IMAP session and **one** destination session.
+ * Folders run sequentially; FETCH/APPEND are pipelined via a bounded queue (profile depth).
+ * Batch size ramps via autopilot when transfers stay stable — never extra logins.
  *
- * Each parallel lane holds one IMAP session to the source and one to the destination,
- * so load on one side ≈ `parallelConnections` (we cap at 4 → safe vs. Gmail’s 15).
- *
- * imapsync (common baseline) runs mostly serial per folder with `--maxsleep 2` and
- * optional `--maxbytespersecond`; we use modest parallelism + autopilot ramp instead.
+ * Provider batch hints come from user-selected mailbox type in `migration-provider-profile.ts`
+ * (gmail / outlook / icloud / generic) — not from hostname sniffing.
  */
 
 /** UIDs per FETCH during transfer — balance burst size vs. server tolerance. */
@@ -32,12 +27,3 @@ export const INTER_BATCH_PAUSE_MS = 60;
 
 /** Pause between failure-sweep passes. */
 export const FAILURE_SWEEP_BASE_DELAY_MS = 3_000;
-
-/** Parallel IMAP lanes (connections per side = lane count). */
-export const MIGRATION_PARALLEL = {
-	minLanes: 1,
-	startLanes: 2,
-	maxLanes: 4,
-	/** Successful batches before trying +1 lane (only while below maxLanes). */
-	stableBatchesToGrow: 6,
-} as const;

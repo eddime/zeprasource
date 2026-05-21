@@ -1,6 +1,6 @@
 /** User-facing copy for the free local backup feature. */
 export const BACKUP_COPY = {
-	panelTitle: "Also save a local copy while migrating",
+	panelTitle: "Save a local backup while migrating",
 	panelHint:
 		"Optional .eml backup on your Mac during the move — import in Apple Mail or Thunderbird anytime.",
 	connectTargetLabel: "Backup locally",

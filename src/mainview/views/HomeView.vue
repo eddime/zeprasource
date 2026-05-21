@@ -60,7 +60,9 @@ const {
 	testingSource,
 	testingDest,
 	loadingFolderStats,
+	measuringFolderBytes,
 	folderStatsError,
+	folderStatsProgress,
 } = storeToRefs(mailboxes);
 
 const { progress, overallPercent, ui, isLiveMigration, plannedDurationHint } =
@@ -678,6 +680,9 @@ async function startAnotherMigration() {
 						:source-provider="source.provider"
 						:dest-provider="destination.provider"
 						:loading-stats="loadingFolderStats"
+						:measuring-bytes="measuringFolderBytes"
+						:stats-completed="folderStatsProgress?.completed"
+						:stats-total="folderStatsProgress?.total"
 						:stats-error="folderStatsError"
 						:estimating-size="estimatingSize"
 						:estimate-error="estimateError"

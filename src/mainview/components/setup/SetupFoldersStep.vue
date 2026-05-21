@@ -22,6 +22,9 @@ const props = defineProps<{
 	sourceProvider: MailboxProvider;
 	destProvider: MailboxProvider;
 	loadingStats: boolean;
+	measuringBytes: boolean;
+	statsCompleted?: number;
+	statsTotal?: number;
 	statsError: string | null;
 	estimatingSize: boolean;
 	estimateError: string | null;
@@ -48,10 +51,36 @@ function formatMessageCount(count: number): string {
 }
 
 function folderStatsLabel(folder: FolderMapping): string {
-	if (props.loadingStats && folder.messages === undefined) return "Measuring…";
-	if (folder.messages === undefined) return "—";
-	return `${formatMessageCount(folder.messages)} · ${formatBytes(folder.bytes ?? 0)}`;
+	if (folder.messages === undefined) {
+		return props.loadingStats || props.measuringBytes ? "Measuring…" : "—";
+	}
+	if (folder.bytes === undefined) {
+		return props.measuringBytes
+			? `${formatMessageCount(folder.messages)} · sizing…`
+			: `${formatMessageCount(folder.messages)} · —`;
+	}
+	return `${formatMessageCount(folder.messages)} · ${formatBytes(folder.bytes)}`;
 }
+
+const showMeasureProgress = computed(
+	() =>
+		(props.loadingStats || props.measuringBytes) &&
+		(props.statsTotal ?? 0) > 0,
+);
+
+const measureProgressPercent = computed(() => {
+	const total = props.statsTotal ?? 0;
+	if (total <= 0) return 0;
+	const done = props.statsCompleted ?? 0;
+	return Math.min(100, Math.round((done / total) * 100));
+});
+
+const statsProgressLabel = computed(() => {
+	if (!showMeasureProgress.value) return null;
+	const done = props.statsCompleted ?? 0;
+	const total = props.statsTotal ?? 0;
+	return `${done} of ${total} folders measured`;
+});
 
 const selectedCount = computed(
 	() => folderMappings.value.filter((f) => f.selected).length,
@@ -87,9 +116,11 @@ const totalBytes = computed(() =>
 );
 
 function allFoldersStatsLabel(): string {
-	if (props.loadingStats) return "Measuring…";
 	if (folderMappings.value.every((f) => f.messages === undefined)) {
-		return `${totalCount.value} folders`;
+		return props.loadingStats ? "Measuring…" : `${totalCount.value} folders`;
+	}
+	if (folderMappings.value.some((f) => f.bytes === undefined)) {
+		return `${formatMessageCount(totalMessages.value)} · sizing…`;
 	}
 	return `${formatMessageCount(totalMessages.value)} · ${formatBytes(totalBytes.value)}`;
 }
@@ -106,8 +137,16 @@ const selectedBytes = computed(() =>
 		.reduce((sum, f) => sum + (f.bytes ?? 0), 0),
 );
 
+const allFolderStatsReady = computed(() =>
+	folderMappings.value.every(
+		(f) => f.messages !== undefined && f.bytes !== undefined,
+	),
+);
+
 const selectionSummary = computed(() => {
-	if (props.loadingStats) return "Measuring folder sizes…";
+	if (showMeasureProgress.value) {
+		return statsProgressLabel.value ?? "Measuring folder sizes…";
+	}
 	if (selectedCount.value === 0) return `${selectedCount.value} of ${totalCount.value} selected`;
 	return `${selectedCount.value} folders · ${formatMessageCount(selectedMessages.value)} · ${formatBytes(selectedBytes.value)}`;
 });
@@ -135,12 +174,23 @@ const needsPaidPlan = computed(
 		),
 );
 
-const dockLoading = computed(
-	() => props.estimatingSize || (!props.backupOnly && props.loadingStats),
+const dockProgress = computed(() =>
+	showMeasureProgress.value ? measureProgressPercent.value : undefined,
 );
 
+const dockLoading = computed(() => {
+	if (dockProgress.value !== undefined) return false;
+	return (
+		props.estimatingSize ||
+		(!props.backupOnly &&
+			(props.loadingStats || props.measuringBytes || !allFolderStatsReady.value))
+	);
+});
+
 const startButtonLabel = computed(() => {
-	if (!props.backupOnly && props.loadingStats) return "Measuring…";
+	if (!props.backupOnly && showMeasureProgress.value) {
+		return "Measuring inbox…";
+	}
 	if (props.estimatingSize) return "Starting…";
 
 	const durationSuffix =
@@ -162,10 +212,11 @@ const startButtonLabel = computed(() => {
 
 const canStart = computed(() => {
 	if (selectedCount.value === 0 || props.estimatingSize) return false;
+	if (!allFolderStatsReady.value) return false;
 	if (props.backupOnly) {
 		return !(localBackupEnabled.value && props.backupDiskError);
 	}
-	if (props.loadingStats) return false;
+	if (props.loadingStats || props.measuringBytes) return false;
 	if (localBackupEnabled.value && props.backupDiskError) return false;
 	return true;
 });
@@ -189,8 +240,8 @@ function onSelectAllChange(event: Event) {
 				:title="backupOnly ? 'Choose folders to back up' : 'Choose folders to migrate'"
 				:subline="
 					backupOnly
-						? 'Pick folders to save — sizes fill in as we measure, you can start anytime.'
-						: 'Pick what should move.'
+						? 'Pick folders to save — every folder is measured before you start.'
+						: 'Every folder is measured so totals are exact. Email counts appear first, then sizes for all folders.'
 				"
 				show-back
 				@back="emit('back')"
@@ -273,7 +324,14 @@ function onSelectAllChange(event: Event) {
 									→ {{ folder.destPath }}
 								</span>
 							</span>
-							<span class="folder-stats" :class="{ pending: loadingStats && folder.messages === undefined }">
+							<span
+								class="folder-stats"
+								:class="{
+									pending:
+										(loadingStats && folder.messages === undefined) ||
+										(measuringBytes && folder.bytes === undefined),
+								}"
+							>
 								{{ folderStatsLabel(folder) }}
 							</span>
 						</label>
@@ -287,6 +345,7 @@ function onSelectAllChange(event: Event) {
 			:label="startButtonLabel"
 			:disabled="!canStart"
 			:loading="dockLoading"
+			:progress="dockProgress"
 			@action="emit('startMigration')"
 		>
 			<template v-if="estimateError || quotaWarning || backupDiskError" #top>
@@ -348,6 +407,8 @@ function onSelectAllChange(event: Event) {
 }
 
 .backup-toggle input {
+	width: 1rem;
+	height: 1rem;
 	flex-shrink: 0;
 	margin: 0;
 	accent-color: var(--accent, #0d9488);
@@ -356,7 +417,7 @@ function onSelectAllChange(event: Event) {
 .backup-toggle-text {
 	display: flex;
 	flex-direction: column;
-	gap: 0.25rem;
+	gap: 0.1rem;
 	min-width: 0;
 }
 
@@ -369,7 +430,7 @@ function onSelectAllChange(event: Event) {
 .backup-hint {
 	font-size: 0.72rem;
 	color: var(--muted);
-	line-height: 1.4;
+	line-height: 1.25;
 }
 
 .backup-pick-btn {

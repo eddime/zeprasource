@@ -4,6 +4,7 @@ import type {
 	ConnectionTestResult,
 	FolderMapping,
 	FolderSizeEstimate,
+	FolderStatsProgress,
 	ImapFolder,
 	MailboxCredentials,
 	MigrationProgress,
@@ -90,6 +91,12 @@ export type MailPortRPC = {
 				params: {
 					source: MailboxCredentials;
 					folderPaths: string[];
+					/** Client id so progressive updates can be matched to the active request. */
+					requestId: string;
+					/** Fetch bytes for these folders first (typically user-selected). */
+					priorityPaths?: string[];
+					/** Message counts from connect (skip redundant STATUS round-trips). */
+					knownMessageCounts?: Record<string, number>;
 				};
 				response: FolderSizeEstimate[];
 			};
@@ -228,6 +235,7 @@ export type MailPortRPC = {
 		requests: {};
 		messages: {
 			migrationProgress: MigrationProgress;
+			folderStatsProgress: FolderStatsProgress;
 		};
 	}>;
 };

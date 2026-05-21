@@ -16,6 +16,7 @@ import {
 	measureFolderSizes as measureImapFolderSizes,
 	testImapConnection,
 } from "../imap/imap-client";
+import type { MeasureFolderSizesOptions } from "../imap/imap-folder-measure";
 import {
 	estimatePop3MigrationSize,
 	measurePop3Mailbox,
@@ -111,8 +112,10 @@ export async function measureMailFolderSizes(
 export async function measureSourceFolderSizes(
 	source: MailboxCredentials,
 	folderPaths: string[],
+	onFolder?: (folder: FolderSizeEstimate) => void,
+	options?: MeasureFolderSizesOptions,
 ): Promise<FolderSizeEstimate[]> {
-	return measureImapFolderSizes(asImapCredentials(source), folderPaths);
+	return measureImapFolderSizes(asImapCredentials(source), folderPaths, onFolder, options);
 }
 
 export async function estimateMailMigrationSize(

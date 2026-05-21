@@ -16,6 +16,8 @@
 		"test": "bun test src/bun",
 		"test:generic": "bun run scripts/test-generic-migration.ts",
 		"test:generic:local": "bun run scripts/test-generic-migration-local.ts",
+		"test:turbo:local": "bun run scripts/test-turbo-staging-local.ts",
+		"test:migration:suite": "bun run scripts/test-migration-suite-local.ts",
 		"imap:up": "bun run scripts/start-local-imap-servers.ts",
 		"imap:down": "bun run scripts/stop-local-imap-servers.ts"
 	},

@@ -58,7 +58,7 @@ import {
 	cancelledProgressExtras,
 	userPauseProgressExtras,
 } from "../../shared/migration-progress";
-import type { MigrationProgress } from "../../shared/types";
+import type { FolderSizeEstimate, FolderStatsProgress, MigrationProgress } from "../../shared/types";
 import {
 	createMigrationCheckout,
 	isMigrationCheckoutConfigured,
@@ -73,6 +73,7 @@ import {
 import { getEntitlementStatus } from "../services/lifetime/lifetime-entitlement";
 
 let progressEmitter: ProgressEmitter | null = null;
+let folderStatsEmitter: ((event: FolderStatsProgress) => void) | null = null;
 let mainWindowRpc: ReturnType<typeof BrowserView.defineRPC<MailPortRPC>> | null = null;
 
 export function setProgressBridge(
@@ -81,6 +82,9 @@ export function setProgressBridge(
 	mainWindowRpc = rpc;
 	progressEmitter = (progress: MigrationProgress) => {
 		rpc.send.migrationProgress(progress);
+	};
+	folderStatsEmitter = (event: FolderStatsProgress) => {
+		rpc.send.folderStatsProgress(event);
 	};
 }
 
@@ -120,8 +124,29 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 			estimateMigrationSize: async ({ source, folderPaths, destination }) =>
 				estimateMailMigrationSize(source, folderPaths, destination),
 
-			fetchFolderStats: async ({ source, folderPaths }) =>
-				measureSourceFolderSizes(source, folderPaths),
+			fetchFolderStats: async ({
+				source,
+				folderPaths,
+				requestId,
+				priorityPaths,
+				knownMessageCounts,
+			}) => {
+				const total = folderPaths.length;
+				let completed = 0;
+				const emitFolder = (folder: FolderSizeEstimate) => {
+					completed += 1;
+					folderStatsEmitter?.({
+						requestId,
+						folder,
+						completed,
+						total,
+					});
+				};
+				return measureSourceFolderSizes(source, folderPaths, emitFolder, {
+					priorityPaths,
+					knownMessageCounts,
+				});
+			},
 
 			checkDestinationQuota: async ({ destination, requiredBytes, requiredMessages }) => {
 				return checkDestinationQuota(destination, {

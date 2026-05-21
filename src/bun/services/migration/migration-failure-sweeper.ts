@@ -1,12 +1,13 @@
 import type { Database } from "bun:sqlite";
-import type { FolderMapping, MailboxCredentials } from "../../../shared/types";
+import type { FolderMapping } from "../../../shared/types";
 import { hashString } from "../crypto/local-secrets";
 import { listFailedUidsForFolder } from "../../db/migration-repository";
 import { classifyMigrationError } from "./migration-errors";
 import { transferFolderWithLanes, type FolderTransferHooks } from "./migration-lanes";
+import type { SharedDestAppender } from "./shared-dest-appender";
 import type { MigrationTransferConfig } from "./migration-autopilot";
 import { describeFinishingRemainingActivity } from "./migration-autopilot";
-import type { connectImapClient } from "../imap/imap-client";
+import type { ResilientMailSource } from "../mail/resilient-mail-source";
 
 export const MAX_FAILURE_SWEEPS = 15;
 import { FAILURE_SWEEP_BASE_DELAY_MS } from "./migration-constants";
@@ -52,12 +53,12 @@ export async function sweepFailedMessages(options: {
 	db: Database;
 	migrationId: string;
 	mappings: FolderMapping[];
-	source: MailboxCredentials;
-	destination: MailboxCredentials;
-	destClient: Awaited<ReturnType<typeof connectImapClient>> | null;
+	resilientSource: ResilientMailSource;
+	sharedDest: SharedDestAppender | null;
 	transfer: MigrationTransferConfig;
 	backupRootPath: string | null;
 	backupOnly: boolean;
+	useServerSideCopy: boolean;
 	markMessage: MarkMessageFn;
 	hooksForMapping: (mapping: FolderMapping) => FolderTransferHooks;
 }): Promise<number> {
@@ -71,13 +72,14 @@ export async function sweepFailedMessages(options: {
 			db: options.db,
 			migrationId: options.migrationId,
 			mapping,
-			sourceCreds: options.source,
-			destCreds: options.destination,
-			destClient: options.destClient,
+			resilientSource: options.resilientSource,
+			sharedDest: options.sharedDest,
 			pendingUids: failedUids,
 			transfer: options.transfer,
 			backupRootPath: options.backupRootPath,
 			backupOnly: options.backupOnly,
+			useServerSideCopy: options.useServerSideCopy,
+			transferPhase: "combined",
 			markMessage: options.markMessage,
 			hooks,
 		});

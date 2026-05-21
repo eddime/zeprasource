@@ -15,7 +15,7 @@ import {
 	LOCAL_IMAP_DEST,
 	LOCAL_IMAP_SOURCE,
 } from "../../shared/local-test-servers";
-import { getRpc } from "../lib/electrobun";
+import { electroview, getRpc } from "../lib/electrobun";
 
 function emptyCredentials(): MailboxCredentials {
 	return {
@@ -41,7 +41,30 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 	const sourceTestError = ref<string | null>(null);
 	const destTestError = ref<string | null>(null);
 	const loadingFolderStats = ref(false);
+	const measuringFolderBytes = ref(false);
 	const folderStatsError = ref<string | null>(null);
+	const folderStatsProgress = ref<{ completed: number; total: number } | null>(null);
+
+	let activeFolderStatsRequestId: string | null = null;
+	let folderStatsListenerReady = false;
+
+	function ensureFolderStatsListener() {
+		if (folderStatsListenerReady) return;
+		electroview.rpc?.addMessageListener("folderStatsProgress", (payload) => {
+			if (
+				!activeFolderStatsRequestId ||
+				payload.requestId !== activeFolderStatsRequestId
+			) {
+				return;
+			}
+			applySingleFolderStat(payload.folder);
+			folderStatsProgress.value = {
+				completed: payload.completed,
+				total: payload.total,
+			};
+		});
+		folderStatsListenerReady = true;
+	}
 
 	const sourcePreset = computed(() => PROVIDER_PRESETS[source.value.provider]);
 	const destPreset = computed(() => PROVIDER_PRESETS[destination.value.provider]);
@@ -241,19 +264,55 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		}
 	}
 
+	function normalizeFolderPath(path: string): string {
+		return path.replace(/\\/g, "/").replace(/\/+/g, "/").trim().toLowerCase();
+	}
+
+	function findSourceFolder(sourcePath: string) {
+		const direct = sourceFolders.value.find((f) => f.path === sourcePath);
+		if (direct) return direct;
+		const norm = normalizeFolderPath(sourcePath);
+		return sourceFolders.value.find((f) => normalizeFolderPath(f.path) === norm);
+	}
+
+	function matchFolderStat(
+		stats: Array<{ path: string; messages: number; bytes: number }>,
+		sourcePath: string,
+	) {
+		const direct = stats.find((s) => s.path === sourcePath);
+		if (direct) return direct;
+		const norm = normalizeFolderPath(sourcePath);
+		return stats.find((s) => normalizeFolderPath(s.path) === norm);
+	}
+
 	function buildFolderMappings() {
 		folderMappings.value = sourceFolders.value.map((folder) => ({
 			sourcePath: folder.path,
 			destPath: folder.path,
 			selected: !folder.attributes.includes("\\Noselect"),
+			messages: folder.messageCount ?? 0,
+			bytes: undefined,
 		}));
 	}
 
+	function applySingleFolderStat(stat: {
+		path: string;
+		messages: number;
+		bytes: number;
+	}) {
+		const norm = normalizeFolderPath(stat.path);
+		folderMappings.value = folderMappings.value.map((mapping) =>
+			mapping.sourcePath === stat.path ||
+			normalizeFolderPath(mapping.sourcePath) === norm
+				? { ...mapping, messages: stat.messages, bytes: stat.bytes }
+				: mapping,
+		);
+	}
+
 	function applyFolderStats(stats: Array<{ path: string; messages: number; bytes: number }>) {
-		const byPath = new Map(stats.map((s) => [s.path, s]));
 		folderMappings.value = folderMappings.value.map((mapping) => {
-			const stat = byPath.get(mapping.sourcePath);
-			if (!stat) return { ...mapping, messages: undefined, bytes: undefined };
+			const stat = matchFolderStat(stats, mapping.sourcePath);
+			if (!stat) return mapping;
 			return { ...mapping, messages: stat.messages, bytes: stat.bytes };
 		});
 	}
@@ -278,34 +337,155 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		}
 	}
 
+	function seedFolderMessageCounts() {
+		folderMappings.value = folderMappings.value.map((mapping) => {
+			const folder = findSourceFolder(mapping.sourcePath);
+			const messages =
+				typeof folder?.messageCount === "number"
+					? folder.messageCount
+					: typeof mapping.messages === "number"
+						? mapping.messages
+						: undefined;
+			const bytes =
+				messages === 0 ? 0 : mapping.bytes;
+			return { ...mapping, messages, bytes };
+		});
+	}
+
+	/** Folders still missing message count and/or byte size. */
+	function pathsNeedingMeasurement(): string[] {
+		return folderMappings.value
+			.filter((m) => m.messages === undefined || m.bytes === undefined)
+			.map((m) => m.sourcePath);
+	}
+
+	function selectedPathsNeedingBytes(): string[] {
+		return folderMappings.value
+			.filter(
+				(m) =>
+					m.selected &&
+					(m.messages === undefined || m.bytes === undefined),
+			)
+			.map((m) => m.sourcePath);
+	}
+
 	async function loadFolderStats(force = false) {
 		if (!sourceValidated.value) return;
 		if (folderMappings.value.length === 0) {
 			const loaded = await reloadSourceFolders();
 			if (!loaded) return;
 		}
+
+		if (force) {
+			folderMappings.value = folderMappings.value.map((mapping) => ({
+				...mapping,
+				messages: undefined,
+				bytes: undefined,
+			}));
+		}
+
+		seedFolderMessageCounts();
+
 		if (
 			!force &&
-			folderMappings.value.every((m) => m.messages !== undefined && m.bytes !== undefined)
+			folderMappings.value.every(
+				(m) => m.messages !== undefined && m.bytes !== undefined,
+			)
 		) {
 			return;
 		}
 
-		loadingFolderStats.value = true;
+		await measureAllFolderBytes(force);
+	}
+
+	async function measureAllFolderBytes(force = false) {
+		if (!sourceValidated.value) return;
+
+		const rpcPaths = pathsNeedingMeasurement();
+		if (rpcPaths.length === 0) return;
+
+		const priorityPaths = selectedPathsNeedingBytes();
+		const requestId = crypto.randomUUID();
+		activeFolderStatsRequestId = requestId;
+		folderStatsProgress.value = { completed: 0, total: rpcPaths.length };
+		ensureFolderStatsListener();
+
+		loadingFolderStats.value = folderMappings.value.some((m) => m.messages === undefined);
+		measuringFolderBytes.value = true;
 		folderStatsError.value = null;
+		try {
+			const knownMessageCounts: Record<string, number> = {};
+			for (const mapping of folderMappings.value) {
+				if (!rpcPaths.includes(mapping.sourcePath)) continue;
+				if (typeof mapping.messages === "number") {
+					knownMessageCounts[mapping.sourcePath] = mapping.messages;
+				}
+			}
+
+			const rpc = getRpc();
+			const stats = await rpc.request.fetchFolderStats({
+				source: source.value,
+				folderPaths: rpcPaths,
+				requestId,
+				priorityPaths:
+					priorityPaths.length > 0 ? priorityPaths : undefined,
+				knownMessageCounts,
+			});
+			applyFolderStats(stats);
+			await sweepIncompleteFolderStats(knownMessageCounts);
+		} catch (error) {
+			folderStatsError.value =
+				error instanceof Error ? error.message : "Could not measure folder sizes";
+		} finally {
+			loadingFolderStats.value = false;
+			measuringFolderBytes.value = false;
+			if (activeFolderStatsRequestId === requestId) {
+				activeFolderStatsRequestId = null;
+				folderStatsProgress.value = null;
+			}
+		}
+	}
+
+	/** Second pass for folders LIST-STATUS skipped (empty or odd paths). */
+	async function sweepIncompleteFolderStats(
+		knownMessageCounts: Record<string, number> = {},
+	) {
+		const missing = pathsNeedingMeasurement();
+		if (missing.length === 0) return;
+
+		const requestId = crypto.randomUUID();
+		activeFolderStatsRequestId = requestId;
+		folderStatsProgress.value = {
+			completed: 0,
+			total: (folderStatsProgress.value?.total ?? 0) + missing.length,
+		};
+		ensureFolderStatsListener();
+
 		try {
 			const rpc = getRpc();
 			const stats = await rpc.request.fetchFolderStats({
 				source: source.value,
-				folderPaths: folderMappings.value.map((m) => m.sourcePath),
+				folderPaths: missing,
+				requestId,
+				knownMessageCounts,
 			});
 			applyFolderStats(stats);
-		} catch (error) {
-			folderStatsError.value =
-				error instanceof Error ? error.message : "Could not measure folders";
 		} finally {
-			loadingFolderStats.value = false;
+			if (activeFolderStatsRequestId === requestId) {
+				activeFolderStatsRequestId = null;
+			}
 		}
+
+		folderMappings.value = folderMappings.value.map((mapping) => {
+			if (mapping.messages !== undefined && mapping.bytes !== undefined) {
+				return mapping;
+			}
+			return {
+				...mapping,
+				messages: mapping.messages ?? 0,
+				bytes: mapping.bytes ?? 0,
+			};
+		});
 	}
 
 	async function loadSavedProfiles(): Promise<void> {
@@ -340,7 +520,10 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		sourceTestError.value = null;
 		destTestError.value = null;
 		loadingFolderStats.value = false;
+		measuringFolderBytes.value = false;
 		folderStatsError.value = null;
+		folderStatsProgress.value = null;
+		activeFolderStatsRequestId = null;
 		try {
 			const rpc = getRpc();
 			await rpc.request.clearMailboxProfiles({});
@@ -362,7 +545,9 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		sourceTestError,
 		destTestError,
 		loadingFolderStats,
+		measuringFolderBytes,
 		folderStatsError,
+		folderStatsProgress,
 		sourcePreset,
 		destPreset,
 		applyProviderPreset,

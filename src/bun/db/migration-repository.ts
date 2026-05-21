@@ -417,18 +417,20 @@ export function markMigrationMessage(
 	messageId?: string,
 	error?: string,
 	retryCount = 0,
+	contentSha256?: string | null,
 ): void {
 	database
 		.prepare(
 			`INSERT INTO migration_messages (
-      migration_id, source_folder, source_folder_hash, source_uid, message_id, status, size_bytes, error, retry_count, transferred_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+      migration_id, source_folder, source_folder_hash, source_uid, message_id, status, size_bytes, error, retry_count, content_sha256, transferred_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
     ON CONFLICT(migration_id, source_folder_hash, source_uid) DO UPDATE SET
       status = excluded.status,
       size_bytes = excluded.size_bytes,
       message_id = excluded.message_id,
       error = excluded.error,
       retry_count = excluded.retry_count,
+      content_sha256 = COALESCE(excluded.content_sha256, migration_messages.content_sha256),
       transferred_at = excluded.transferred_at`,
 		)
 		.run(
@@ -441,7 +443,37 @@ export function markMigrationMessage(
 			sizeBytes,
 			encryptString(error ?? null),
 			retryCount,
+			contentSha256 ?? null,
 		);
+}
+
+/** UIDs already on disk in turbo staging — upload only, no re-FETCH. */
+export function listStagedUidsForFolder(
+	migrationId: string,
+	sourceFolder: string,
+): number[] {
+	return listStagedUidsForFolderBySize(migrationId, sourceFolder).map((r) => r.uid);
+}
+
+/** Staged UIDs smallest-first — warms up the connection before large APPENDs. */
+export function listStagedUidsForFolderBySize(
+	migrationId: string,
+	sourceFolder: string,
+): Array<{ uid: number; sizeBytes: number }> {
+	const database = getDatabase();
+	const folderHash = hashString(`migration-message-folder:${migrationId}`, sourceFolder);
+	const rows = database
+		.query(
+			`SELECT source_uid, size_bytes FROM migration_messages
+       WHERE migration_id = ? AND status = 'staged'
+         AND (source_folder_hash = ? OR source_folder = ?)
+       ORDER BY size_bytes ASC, source_uid ASC`,
+		)
+		.all(migrationId, folderHash, sourceFolder) as Array<{
+		source_uid: number;
+		size_bytes: number;
+	}>;
+	return rows.map((r) => ({ uid: r.source_uid, sizeBytes: r.size_bytes }));
 }
 
 export function markFolderCompleted(migrationId: string, sourcePath: string): void {
