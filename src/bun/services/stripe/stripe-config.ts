@@ -1,7 +1,4 @@
-import {
-	STRIPE_MIGRATION_LOOKUP_KEYS,
-	type PaidMigrationTierId,
-} from "../../../shared/stripe-checkout";
+import { STRIPE_MIGRATION_PER_GB_LOOKUP_KEY } from "../../../shared/stripe-checkout";
 
 export const ZEPRA_PAYMENT_URL_SCHEME = "zepra";
 
@@ -18,6 +15,6 @@ export function isStripeConfigured(): boolean {
 	return Boolean(getStripeSecretKey());
 }
 
-export function lookupKeyForTier(tierId: PaidMigrationTierId): string {
-	return STRIPE_MIGRATION_LOOKUP_KEYS[tierId];
+export function migrationPerGbLookupKey(): string {
+	return STRIPE_MIGRATION_PER_GB_LOOKUP_KEY;
 }

@@ -31,6 +31,8 @@ watch(isInactive, (inactive, wasInactive) => {
 	}, 700);
 });
 
+const dockCtaHot = ref(false);
+
 const iconKind = computed((): "migrate" | "pending" | "measure" | null => {
 	if (props.loading) return null;
 	if (props.label === "Waiting for connection") return "pending";
@@ -49,6 +51,7 @@ const currentY = ref(0);
 const iconX = ref(0);
 const iconY = ref(0);
 let tracking = false;
+const ctaTracking = ref(false);
 let rafId: number | null = null;
 
 const ctaTiltStyle = computed(() => ({
@@ -100,8 +103,14 @@ function startTiltLoop() {
 	if (rafId === null) rafId = requestAnimationFrame(tickTilt);
 }
 
+function onCtaPointerEnter() {
+	if (props.disabled || props.loading) return;
+	dockCtaHot.value = true;
+}
+
 function onCtaPointerMove(e: MouseEvent) {
 	if (props.disabled || props.loading || prefersReducedMotion()) return;
+	dockCtaHot.value = true;
 
 	const el = e.currentTarget as HTMLElement;
 	const rect = el.getBoundingClientRect();
@@ -109,13 +118,16 @@ function onCtaPointerMove(e: MouseEvent) {
 	const ny = ((e.clientY - rect.top) / rect.height - 0.5) * 2;
 
 	tracking = true;
+	ctaTracking.value = true;
 	targetX.value = clampTilt(nx);
 	targetY.value = clampTilt(ny * 0.45);
 	startTiltLoop();
 }
 
 function onCtaPointerLeave() {
+	dockCtaHot.value = false;
 	tracking = false;
+	ctaTracking.value = false;
 	targetX.value = 0;
 	targetY.value = 0;
 	startTiltLoop();
@@ -130,7 +142,11 @@ onUnmounted(() => {
 <template>
 	<footer
 		class="app-dock"
-		:class="{ 'dock-ready': isReady, 'dock-ready-pulse': showReadyPulse }"
+		:class="{
+			'dock-ready': isReady,
+			'dock-ready-pulse': showReadyPulse,
+			'dock-cta-hot': dockCtaHot,
+		}"
 	>
 		<div class="dock-shell">
 			<div v-if="$slots.top" class="app-dock-top">
@@ -143,12 +159,14 @@ onUnmounted(() => {
 				<AppButton
 					block
 					class="dock-cta"
+					:class="{ 'dock-cta-tracking': ctaTracking }"
 					variant="primary"
 					:disabled="disabled"
 					:loading="loading"
 					:style="ctaTiltStyle"
-					@mousemove="onCtaPointerMove"
-					@mouseleave="onCtaPointerLeave"
+					@pointerenter="onCtaPointerEnter"
+					@pointermove="onCtaPointerMove"
+					@pointerleave="onCtaPointerLeave"
 					@click="$emit('action')"
 				>
 					<span class="dock-cta-inner">
@@ -169,6 +187,8 @@ onUnmounted(() => {
 	--dock-lift: var(--app-dock-lift, 0.85rem);
 	--dock-ease: cubic-bezier(0.22, 1, 0.36, 1);
 	--dock-ease-bounce: cubic-bezier(0.22, 1.9, 0.36, 1);
+	--dock-shape-duration: 0.62s;
+	--dock-lift-duration: 0.5s;
 	position: fixed;
 	left: var(--site-padding-x, 1.25rem);
 	right: var(--site-padding-x, 1.25rem);
@@ -186,25 +206,22 @@ onUnmounted(() => {
 	box-shadow: none;
 	transform: translateY(0);
 	transition:
-		transform 0.38s var(--dock-ease),
-		border-radius 0.42s var(--dock-ease),
-		box-shadow 0.36s ease;
+		transform var(--dock-lift-duration) var(--dock-ease),
+		border-radius var(--dock-shape-duration) var(--dock-ease),
+		box-shadow var(--dock-lift-duration) var(--dock-ease),
+		background-color 0.35s ease;
 }
 
-.app-dock.dock-ready:hover .dock-shell,
-.app-dock.dock-ready:focus-within .dock-shell {
+.app-dock.dock-ready.dock-cta-hot .dock-shell,
+.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+	.dock-shell {
 	border-radius: var(--radius-pill, 999px);
 	box-shadow: 0 10px 32px rgba(0, 0, 0, 0.2);
-	/* Transform only — padding would leave a dead zone and flicker at the bottom edge */
 	transform: translateY(calc(-1 * var(--dock-lift)));
 }
 
 .app-dock:not(.dock-ready) .dock-shell {
-	transition:
-		transform 0.38s var(--dock-ease),
-		border-radius 0.42s var(--dock-ease),
-		box-shadow 0.36s ease,
-		background-color 0.35s ease;
+	background: #2a2a2a;
 }
 
 .app-dock-top {
@@ -272,8 +289,9 @@ onUnmounted(() => {
 	transition: height 0.62s var(--dock-ease-bounce);
 }
 
-.app-dock.dock-ready:hover .dock-row,
-.app-dock.dock-ready:focus-within .dock-row {
+.app-dock.dock-ready.dock-cta-hot .dock-row,
+.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+	.dock-row {
 	height: var(--dock-h-active);
 }
 
@@ -307,8 +325,9 @@ onUnmounted(() => {
 	transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-.app-dock.dock-ready:hover :deep(.dock-folder-icon),
-.app-dock.dock-ready:focus-within :deep(.dock-folder-icon) {
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-folder-icon),
+.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+	:deep(.dock-folder-icon) {
 	transform: translateY(-2px);
 }
 
@@ -333,8 +352,9 @@ onUnmounted(() => {
 		opacity 0.15s ease;
 }
 
-.app-dock.dock-ready:hover :deep(.dock-cta.btn:not(:disabled)),
-.app-dock.dock-ready:focus-within :deep(.dock-cta.btn:not(:disabled)) {
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-cta.btn:not(:disabled)),
+.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+	:deep(.dock-cta.btn:not(:disabled)) {
 	font-size: 1.0625rem;
 }
 
@@ -347,11 +367,7 @@ onUnmounted(() => {
 	opacity: 0.72;
 }
 
-.app-dock:not(.dock-ready) .dock-shell {
-	background: #2a2a2a;
-}
-
-.app-dock.dock-ready-pulse .dock-shell {
+.app-dock.dock-ready-pulse:not(.dock-cta-hot) .dock-shell {
 	animation: dock-ready-pulse 0.7s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -391,11 +407,6 @@ onUnmounted(() => {
 	transform-style: preserve-3d;
 }
 
-.app-dock :deep(.dock-label) {
-	line-height: 1.2;
-	transition: color 0.2s ease;
-}
-
 .app-dock :deep(.dock-icon-wrap) {
 	width: 1.125rem;
 	height: 1.125rem;
@@ -412,11 +423,40 @@ onUnmounted(() => {
 		opacity 0.28s ease;
 }
 
-.app-dock.dock-ready:hover :deep(.dock-icon-wrap),
-.app-dock.dock-ready:focus-within :deep(.dock-icon-wrap) {
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-wrap),
+.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+	:deep(.dock-icon-wrap) {
 	width: 1.3125rem;
 	height: 1.3125rem;
 	opacity: 1;
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-stem) {
+	transform: translateX(3px);
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-head) {
+	transform: translateX(5px);
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-link-a) {
+	transform: rotate(-10deg);
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-link-b) {
+	transform: rotate(10deg);
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-bar-1) {
+	transform: scaleY(0.82);
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-bar-2) {
+	transform: scaleY(1.08);
+}
+
+.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-bar-3) {
+	transform: scaleY(0.9);
 }
 
 .app-dock :deep(.dock-cta .spin) {
@@ -428,8 +468,6 @@ onUnmounted(() => {
 	.app-dock,
 	.dock-shell,
 	.dock-row,
-	.app-dock.dock-ready:hover .dock-shell,
-	.app-dock.dock-ready:focus-within .dock-shell,
 	.app-dock :deep(.dock-cta.btn),
 	.app-dock :deep(.dock-cta-inner),
 	.app-dock :deep(.dock-icon-wrap),
@@ -442,31 +480,41 @@ onUnmounted(() => {
 		background-color: #0a0a0a;
 	}
 
-	.app-dock.dock-ready:hover .dock-row,
-	.app-dock.dock-ready:focus-within .dock-row {
+	.app-dock.dock-ready.dock-cta-hot .dock-row,
+	.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+		.dock-row {
 		height: var(--dock-h-active);
 	}
 
-	.app-dock.dock-ready:hover .dock-shell,
-	.app-dock.dock-ready:focus-within .dock-shell {
+	.app-dock.dock-ready.dock-cta-hot .dock-shell,
+	.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+		.dock-shell {
 		border-radius: var(--radius-pill, 999px);
 		box-shadow: 0 10px 36px rgba(0, 0, 0, 0.22);
 		transform: translateY(calc(-1 * var(--dock-lift)));
 	}
 
-	.app-dock.dock-ready:hover :deep(.dock-cta.btn:not(:disabled)),
-	.app-dock.dock-ready:focus-within :deep(.dock-cta.btn:not(:disabled)) {
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-cta.btn:not(:disabled)),
+	.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+		:deep(.dock-cta.btn:not(:disabled)) {
 		font-size: 1.0625rem;
 	}
 
-	.app-dock.dock-ready:hover :deep(.dock-icon-wrap),
-	.app-dock.dock-ready:focus-within :deep(.dock-icon-wrap) {
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-wrap),
+	.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+		:deep(.dock-icon-wrap) {
 		width: 1.3125rem;
 		height: 1.3125rem;
 	}
 
-	.app-dock.dock-ready:hover :deep(.dock-folder-icon),
-	.app-dock.dock-ready:focus-within :deep(.dock-folder-icon),
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-folder-icon),
+	.app-dock.dock-ready:focus-within:has(.dock-cta.btn:focus-visible:not(:disabled))
+		:deep(.dock-folder-icon),
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-stem),
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-head),
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-link-a),
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-link-b),
+	.app-dock.dock-ready.dock-cta-hot :deep(.dock-icon-bar),
 	.app-dock :deep(.dock-cta-inner),
 	.app-dock :deep(.dock-icon-wrap) {
 		transform: none;

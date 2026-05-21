@@ -54,7 +54,7 @@ const perks: Array<{ icon: PerkIconKind; title: string; text: string }> = [
 			>
 				Test payment
 			</button>
-			<button type="button" class="pricing-link" @click="pricingOpen = true">Pricing</button>
+			<button type="button" class="pricing-link" @click="pricingOpen = true">Fair pricing</button>
 		</header>
 		<PricingSheet v-model:open="pricingOpen" />
 
@@ -91,7 +91,7 @@ const perks: Array<{ icon: PerkIconKind; title: string; text: string }> = [
 			<div class="copy">
 				<h1 class="title anim" style="--i: 1">Zepra</h1>
 				<p class="sub anim" style="--i: 2">
-					Migrate IMAP to IMAP on your Mac — with a free local backup while you move.
+					Migrate IMAP to IMAP on your Mac — or back up a mailbox locally for free.
 				</p>
 
 				<ul class="perks anim" style="--i: 3">

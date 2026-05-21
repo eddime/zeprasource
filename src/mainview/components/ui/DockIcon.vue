@@ -89,9 +89,13 @@ defineProps<{
 .dock-icon-stem,
 .dock-icon-head,
 .dock-icon-link-a,
-.dock-icon-link-b,
-.dock-icon-bar {
-	transition: transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+.dock-icon-link-b {
+	transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
 	transform-origin: center;
+}
+
+.dock-icon-bar {
+	transition: transform 0.34s cubic-bezier(0.22, 1, 0.36, 1);
+	transform-origin: center bottom;
 }
 </style>

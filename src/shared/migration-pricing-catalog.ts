@@ -1,16 +1,12 @@
-import type { MigrationPricingTier } from "./pricing";
-
-export type MigrationPriceLabels = {
-	free: string;
-	starter: string;
-	plus: string;
-	pro: string;
-};
-
-export type MigrationPricingPlan = MigrationPricingTier & { sizeLabel: string };
-
 export type MigrationPricingCatalog = {
 	configured: boolean;
-	priceLabels: MigrationPriceLabels;
-	plans: MigrationPricingPlan[];
+	/** Active Stripe Price id — used for Checkout line items. */
+	priceId: string | null;
+	freeLimitGb: number;
+	freeLimitBytes: number;
+	pricePerGbCents: number;
+	pricePerGbLabel: string;
+	currency: string;
+	/** Set when configured is false (e.g. stripe_not_configured). */
+	error?: string;
 };

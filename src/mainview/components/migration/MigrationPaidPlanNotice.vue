@@ -2,9 +2,8 @@
 import { computed, onMounted } from "vue";
 import stripeWordmark from "@/assets/stripe-wordmark.svg";
 import {
-	FREE_MIGRATION_LIMIT_BYTES,
-	PRICING_TIER_LIMITS_GB,
 	formatBytes,
+	getBillableBreakdown,
 	requiresPaidPlan,
 } from "../../../shared/pricing";
 import { usePricingStore } from "../../stores/pricing";
@@ -21,45 +20,53 @@ onMounted(() => {
 	void pricing.ensureLoaded();
 });
 
-const tier = computed(() => pricing.tierForBytes(props.selectedBytes));
+const catalog = computed(() => pricing.activeCatalog);
+
+const breakdown = computed(() => {
+	const c = catalog.value;
+	return c ? getBillableBreakdown(props.selectedBytes, c) : null;
+});
+
+const freeLimitGb = computed(() => catalog.value?.freeLimitGb ?? 0);
+const freeLimitBytes = computed(() => catalog.value?.freeLimitBytes ?? 0);
 
 const showPaid = computed(
 	() =>
+		pricing.isReady &&
 		!props.loadingStats &&
 		props.hasSelection !== false &&
 		props.selectedBytes > 0 &&
-		requiresPaidPlan(props.selectedBytes),
+		requiresPaidPlan(props.selectedBytes, freeLimitBytes.value) &&
+		breakdown.value,
 );
 
 const showFree = computed(
 	() =>
+		pricing.isReady &&
 		!props.loadingStats &&
 		props.hasSelection !== false &&
 		props.selectedBytes > 0 &&
-		!requiresPaidPlan(props.selectedBytes),
+		!requiresPaidPlan(props.selectedBytes, freeLimitBytes.value),
 );
 
-const freeLimitLabel = computed(() => formatBytes(FREE_MIGRATION_LIMIT_BYTES));
-
-const overBytes = computed(() =>
-	Math.max(0, props.selectedBytes - FREE_MIGRATION_LIMIT_BYTES),
-);
-
-/** Share of the pill reserved for the free tier (rest = over limit). */
 const freeZonePercent = computed(() =>
-	Math.max(22, Math.min(72, (FREE_MIGRATION_LIMIT_BYTES / props.selectedBytes) * 100)),
+	Math.max(
+		22,
+		Math.min(72, (freeLimitBytes.value / props.selectedBytes) * 100),
+	),
 );
 
-const barAriaLabel = computed(
-	() =>
-		`Above the free limit. ${formatBytes(props.selectedBytes)} selected. Free up to ${freeLimitLabel.value}. ${formatBytes(overBytes.value)} over.`,
-);
+const barAriaLabel = computed(() => {
+	const b = breakdown.value;
+	if (!b) return "";
+	return `${b.totalLabel} selected. ${freeLimitGb.value} GB free. Plus ${b.billableGb} GB. ${b.priceLabel} once.`;
+});
 </script>
 
 <template>
 	<Transition name="plan-notice" mode="out-in">
 		<div
-			v-if="showPaid"
+			v-if="showPaid && breakdown"
 			key="paid"
 			class="paid-notice"
 			role="status"
@@ -67,12 +74,17 @@ const barAriaLabel = computed(
 			:style="{ '--free-zone': `${freeZonePercent}%` }"
 		>
 			<div class="paid-zone paid-zone-free">
-				<span class="paid-label">Over {{ freeLimitLabel }}</span>
+				<span class="paid-label">Free {{ freeLimitGb }} GB</span>
 			</div>
 			<div class="paid-zone paid-zone-over">
 				<span class="paid-copy">
-					<strong>{{ formatBytes(selectedBytes) }}</strong>
-					· {{ tier.name }} <strong>{{ tier.priceLabel }}</strong> once
+					<strong class="paid-extra">+{{ breakdown.billableGb }} GB</strong>
+					<span class="paid-sep">×</span>
+					{{ breakdown.unitPriceLabel }}
+					<span class="paid-sep">=</span>
+					<strong>{{ breakdown.priceLabel }}</strong>
+					once
+					<span class="paid-total">· {{ breakdown.totalLabel }}</span>
 				</span>
 				<span class="paid-stripe">
 					<img
@@ -88,7 +100,7 @@ const barAriaLabel = computed(
 
 		<p v-else-if="showFree" key="free" class="free-notice" role="status">
 			<strong>{{ formatBytes(selectedBytes) }}</strong>
-			— within {{ PRICING_TIER_LIMITS_GB.free }} GB free
+			— within {{ freeLimitGb }} GB free
 		</p>
 	</Transition>
 </template>
@@ -166,12 +178,27 @@ const barAriaLabel = computed(
 	font-size: 0.72rem;
 	line-height: 1.35;
 	color: var(--muted);
-	transition: opacity 0.25s ease;
 }
 
-.paid-copy strong {
-	color: color-mix(in srgb, var(--fg) 88%, transparent);
-	font-weight: 700;
+.paid-extra {
+	color: var(--fg);
+	font-weight: 800;
+	font-size: 0.78rem;
+}
+
+.paid-copy > strong:not(.paid-extra) {
+	color: var(--fg);
+	font-weight: 800;
+}
+
+.paid-sep {
+	margin: 0 0.12rem;
+}
+
+.paid-total {
+	font-size: 0.68rem;
+	font-weight: 500;
+	color: var(--muted);
 }
 
 .paid-stripe {

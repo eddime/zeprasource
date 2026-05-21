@@ -1,63 +1,96 @@
 import { describe, expect, test } from "bun:test";
+import type { MigrationPricingCatalog } from "../migration-pricing-catalog";
 import {
-	FALLBACK_MIGRATION_PRICE_LABELS,
-	PRICING_TIER_LIMITS_GB,
-	buildPricingPlans,
-	getPricingTier,
+	billableGigabytes,
+	buildPricingExamples,
+	getBillableBreakdown,
+	getMigrationPricingQuote,
+	migrationChargeCents,
 	requiresPaidPlan,
 } from "../pricing";
 
 const gb = (n: number) => n * 1024 ** 3;
+const FREE_GB = 2;
+const FREE_BYTES = FREE_GB * 1024 ** 3;
 
-const customLabels = {
-	free: "€0",
-	starter: "€8",
-	plus: "€13",
-	pro: "€30",
+const testCatalog: MigrationPricingCatalog = {
+	configured: true,
+	priceId: "price_test",
+	freeLimitGb: FREE_GB,
+	freeLimitBytes: FREE_BYTES,
+	pricePerGbCents: 75,
+	pricePerGbLabel: "$0.75 / GB",
+	currency: "usd",
 };
 
-describe("getPricingTier", () => {
+describe("billableGigabytes", () => {
 	test("free up to 2 GB", () => {
-		expect(getPricingTier(gb(2)).id).toBe("free");
-		expect(getPricingTier(gb(2)).priceLabel).toBe("€0");
+		expect(billableGigabytes(gb(2), FREE_BYTES)).toBe(0);
+		expect(billableGigabytes(gb(1.5), FREE_BYTES)).toBe(0);
 	});
 
-	test("starter captures typical personal mailboxes (3–10 GB)", () => {
-		expect(getPricingTier(gb(3)).id).toBe("starter");
-		expect(getPricingTier(gb(8)).id).toBe("starter");
-		expect(getPricingTier(gb(10)).id).toBe("starter");
-		expect(getPricingTier(gb(10), customLabels).priceLabel).toBe("€8");
-	});
-
-	test("plus for large mailboxes up to 25 GB", () => {
-		expect(getPricingTier(gb(11)).id).toBe("plus");
-		expect(getPricingTier(gb(25)).id).toBe("plus");
-		expect(getPricingTier(gb(25), customLabels).priceLabel).toBe("€13");
-	});
-
-	test("pro only above 25 GB", () => {
-		expect(getPricingTier(gb(25.1)).id).toBe("pro");
-		expect(getPricingTier(gb(80), customLabels).priceLabel).toBe("€30");
+	test("ceil partial gigabytes over free limit", () => {
+		expect(billableGigabytes(gb(2) + 1, FREE_BYTES)).toBe(1);
+		expect(billableGigabytes(gb(3), FREE_BYTES)).toBe(1);
+		expect(billableGigabytes(gb(10), FREE_BYTES)).toBe(8);
+		expect(billableGigabytes(gb(25), FREE_BYTES)).toBe(23);
 	});
 });
 
-describe("buildPricingPlans", () => {
-	test("uses dynamic labels when provided", () => {
-		const plans = buildPricingPlans(customLabels);
-		expect(plans.find((p) => p.id === "plus")?.priceLabel).toBe("€13");
+describe("getMigrationPricingQuote", () => {
+	test("free tier quote", () => {
+		const quote = getMigrationPricingQuote(gb(2), testCatalog);
+		expect(quote.id).toBe("free");
+		expect(quote.priceLabel).toBe("$0");
+		expect(quote.formulaLabel).toBeNull();
 	});
 
-	test("falls back to static labels", () => {
-		const plans = buildPricingPlans();
-		expect(plans.find((p) => p.id === "starter")?.priceLabel).toBe(
-			FALLBACK_MIGRATION_PRICE_LABELS.starter,
-		);
+	test("paid quote uses per-GB formula", () => {
+		const quote = getMigrationPricingQuote(gb(10), testCatalog);
+		expect(quote.id).toBe("paid");
+		expect(quote.billableGb).toBe(8);
+		expect(quote.formulaLabel).toBe("8 GB × $0.75");
+		expect(quote.priceLabel).toBe("$6");
+	});
+
+	test("custom unit price from catalog", () => {
+		const quote = getMigrationPricingQuote(gb(10), {
+			...testCatalog,
+			pricePerGbCents: 100,
+			pricePerGbLabel: "$1.00 / GB",
+		});
+		expect(quote.priceLabel).toBe("$8");
+	});
+});
+
+describe("migrationChargeCents", () => {
+	test("linear total", () => {
+		expect(
+			migrationChargeCents(gb(10), testCatalog.pricePerGbCents, FREE_BYTES),
+		).toBe(8 * 75);
+	});
+});
+
+describe("buildPricingExamples", () => {
+	test("includes sample mailbox sizes", () => {
+		const examples = buildPricingExamples(testCatalog);
+		expect(examples.map((e) => e.sizeGb)).toEqual([10, 25, 50]);
 	});
 });
 
 describe("requiresPaidPlan", () => {
 	test("paid above free limit", () => {
-		expect(requiresPaidPlan(gb(PRICING_TIER_LIMITS_GB.free))).toBe(false);
-		expect(requiresPaidPlan(gb(PRICING_TIER_LIMITS_GB.free) + 1)).toBe(true);
+		expect(requiresPaidPlan(gb(FREE_GB), FREE_BYTES)).toBe(false);
+		expect(requiresPaidPlan(gb(FREE_GB) + 1, FREE_BYTES)).toBe(true);
+	});
+});
+
+describe("getBillableBreakdown", () => {
+	test("shows overage before rounded billable GB", () => {
+		const bytes = 2.94 * 1024 ** 3;
+		const breakdown = getBillableBreakdown(bytes, testCatalog);
+		expect(breakdown?.totalLabel).toBe("2.94 GB");
+		expect(breakdown?.chargeLine).toBe("+0.94 GB → 1 GB × $0.75");
+		expect(breakdown?.priceLabel).toBe("$0.75");
 	});
 });

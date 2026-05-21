@@ -1,16 +1,10 @@
 import Stripe from "stripe";
+import type { MigrationPricingCatalog } from "../../../shared/migration-pricing-catalog";
 import {
-	buildPricingPlans,
-	FALLBACK_MIGRATION_PRICE_LABELS,
-} from "../../../shared/pricing";
-import type {
-	MigrationPriceLabels,
-	MigrationPricingCatalog,
-} from "../../../shared/migration-pricing-catalog";
-import {
-	STRIPE_MIGRATION_LOOKUP_KEYS,
-	type PaidMigrationTierId,
-} from "../../../shared/stripe-checkout";
+	migrationCatalogFromStripePrice,
+	migrationCatalogUnavailable,
+} from "../../../shared/stripe-migration-catalog";
+import { STRIPE_MIGRATION_PER_GB_LOOKUP_KEY } from "../../../shared/stripe-checkout";
 import { getStripeSecretKey, isStripeConfigured } from "./stripe-config";
 
 const CACHE_TTL_MS = 5 * 60 * 1000;
@@ -26,74 +20,50 @@ function createStripeClient(): Stripe {
 	return new Stripe(secretKey);
 }
 
-export function formatStripeUnitAmount(
-	unitAmount: number,
-	currency: string,
-): string {
-	const value = unitAmount / 100;
-	const code = currency.toUpperCase();
-	const wholeEuro = code === "EUR" && unitAmount % 100 === 0;
-	return new Intl.NumberFormat("de-DE", {
-		style: "currency",
-		currency: code,
-		minimumFractionDigits: wholeEuro ? 0 : 2,
-		maximumFractionDigits: wholeEuro ? 0 : 2,
-	}).format(value);
-}
-
-function lookupKeyToTierId(lookupKey: string): PaidMigrationTierId | null {
-	for (const [tierId, key] of Object.entries(STRIPE_MIGRATION_LOOKUP_KEYS)) {
-		if (key === lookupKey) return tierId as PaidMigrationTierId;
-	}
-	return null;
-}
-
-async function fetchStripePriceLabels(): Promise<{
-	labels: MigrationPriceLabels;
-	configured: boolean;
-}> {
-	const labels: MigrationPriceLabels = { ...FALLBACK_MIGRATION_PRICE_LABELS };
-
+async function fetchStripeMigrationCatalog(): Promise<MigrationPricingCatalog> {
 	if (!isStripeConfigured()) {
-		return { labels, configured: false };
+		return migrationCatalogUnavailable("stripe_not_configured");
 	}
 
 	const stripe = createStripeClient();
-	const lookupKeys = Object.values(STRIPE_MIGRATION_LOOKUP_KEYS);
-
 	try {
 		const response = await stripe.prices.list({
-			lookup_keys: lookupKeys,
-			limit: lookupKeys.length,
+			lookup_keys: [STRIPE_MIGRATION_PER_GB_LOOKUP_KEY],
+			limit: 1,
 			active: true,
+			expand: ["data.product"],
 		});
-
-		let fetchedPaidTiers = 0;
-		for (const price of response.data) {
-			if (!price.lookup_key || price.unit_amount == null) continue;
-			const tierId =
-				(price.metadata?.tier_id as PaidMigrationTierId | undefined) ??
-				lookupKeyToTierId(price.lookup_key);
-			if (
-				tierId !== "starter" &&
-				tierId !== "plus" &&
-				tierId !== "pro"
-			) {
-				continue;
+		const price = response.data[0];
+		if (!price?.unit_amount || !price.id) {
+			const legacy = await stripe.prices.list({
+				lookup_keys: [
+					"zepra_migration_trot",
+					"zepra_migration_gallop",
+					"zepra_migration_stampede",
+				],
+				limit: 3,
+				active: true,
+			});
+			if (legacy.data.length > 0) {
+				return migrationCatalogUnavailable("legacy_tier_prices_only");
 			}
-			labels[tierId] = formatStripeUnitAmount(
-				price.unit_amount,
-				price.currency,
-			);
-			fetchedPaidTiers += 1;
+			return migrationCatalogUnavailable("price_not_found");
 		}
 
-		return {
-			labels,
-			configured: fetchedPaidTiers === lookupKeys.length,
-		};
+		const product =
+			typeof price.product === "object" && price.product && "metadata" in price.product
+				? price.product
+				: null;
+
+		return migrationCatalogFromStripePrice({
+			id: price.id,
+			unit_amount: price.unit_amount,
+			currency: price.currency,
+			metadata: price.metadata as Record<string, string>,
+			productMetadata: product?.metadata as Record<string, string> | undefined,
+		});
 	} catch {
-		return { labels: { ...FALLBACK_MIGRATION_PRICE_LABELS }, configured: false };
+		return migrationCatalogUnavailable("stripe_fetch_failed");
 	}
 }
 
@@ -103,15 +73,12 @@ export async function getMigrationPricingCatalog(): Promise<MigrationPricingCata
 		return cachedCatalog;
 	}
 
-	const { labels, configured } = await fetchStripePriceLabels();
-	const catalog: MigrationPricingCatalog = {
-		configured,
-		priceLabels: labels,
-		plans: buildPricingPlans(labels),
-	};
-
-	cachedCatalog = catalog;
-	cachedAt = now;
+	const catalog = await fetchStripeMigrationCatalog();
+	// Only cache successful catalogs — retry immediately after Dashboard fixes.
+	if (catalog.configured) {
+		cachedCatalog = catalog;
+		cachedAt = now;
+	}
 	return catalog;
 }
 

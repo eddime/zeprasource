@@ -6,11 +6,8 @@ import type {
 	MailboxCredentials,
 	MigrationSizeEstimate,
 } from "../../../shared/types";
-import { estimateMigrationDuration } from "../../../shared/migration-duration";
-import {
-	FREE_MIGRATION_LIMIT_BYTES,
-	requiresPaidPlan,
-} from "../../../shared/pricing";
+import { buildMigrationSizeEstimate } from "../../../shared/migration-size-estimate";
+import { getMigrationPricingCatalog } from "../stripe/migration-pricing-catalog";
 import { logger } from "../../utils/logger";
 import {
 	formatImapError,
@@ -294,28 +291,15 @@ export async function estimateMigrationSize(
 	destination?: MailboxCredentials,
 ): Promise<MigrationSizeEstimate> {
 	const folders = await measureFolderSizes(source, folderPaths);
-	let totalBytes = 0;
-	let messageCount = 0;
-	for (const folder of folders) {
-		totalBytes += folder.bytes;
-		messageCount += folder.messages;
-	}
+	const catalog = await getMigrationPricingCatalog();
 
-	const duration = estimateMigrationDuration({
-		totalBytes,
-		messageCount,
+	return buildMigrationSizeEstimate({
+		folders,
 		sourceProvider: source.provider,
 		destProvider: destination?.provider ?? "generic",
+		pricing: {
+			configured: catalog.configured,
+			freeLimitBytes: catalog.configured ? catalog.freeLimitBytes : 0,
+		},
 	});
-
-	return {
-		totalBytes,
-		messageCount,
-		folders,
-		requiresPayment: requiresPaidPlan(totalBytes),
-		freeLimitBytes: FREE_MIGRATION_LIMIT_BYTES,
-		durationLabel: duration.label,
-		durationRangeLabel: duration.rangeLabel,
-		secondsTypical: duration.secondsTypical,
-	};
 }

@@ -60,6 +60,12 @@ import {
 	waitForMigrationCheckout,
 } from "../services/stripe/migration-checkout";
 import { getMigrationPricingCatalog } from "../services/stripe/migration-pricing-catalog";
+import { getLifetimePricingCatalog } from "../services/stripe/lifetime-pricing-catalog";
+import {
+	createLifetimeCheckout,
+	waitForLifetimeCheckout,
+} from "../services/stripe/lifetime-checkout";
+import { getEntitlementStatus } from "../services/lifetime/lifetime-entitlement";
 
 let progressEmitter: ProgressEmitter | null = null;
 let mainWindowRpc: ReturnType<typeof BrowserView.defineRPC<MailPortRPC>> | null = null;
@@ -164,6 +170,13 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 						{ ...params, plannedSecondsTypical, verifiedLicense },
 						progressEmitter,
 					);
+					const snapshot = getMigrationProgressSnapshot(
+						migrationId,
+						"running",
+						undefined,
+						{ reconcile: true },
+					);
+					if (snapshot) progressEmitter(snapshot);
 					return { migrationId };
 				} catch (error) {
 					if (error instanceof MigrationCapacityError) {
@@ -275,6 +288,21 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 				waitForMigrationCheckout(sessionId),
 
 			getMigrationPricingCatalog: () => getMigrationPricingCatalog(),
+
+			getZepraPricingCatalog: async () => {
+				const [perGb, lifetime] = await Promise.all([
+					getMigrationPricingCatalog(),
+					getLifetimePricingCatalog(),
+				]);
+				return { perGb, lifetime };
+			},
+
+			getEntitlementStatus: () => getEntitlementStatus(),
+
+			createLifetimeCheckout: () => createLifetimeCheckout(),
+
+			waitForLifetimeCheckout: ({ sessionId }) =>
+				waitForLifetimeCheckout(sessionId),
 		},
 		messages: {},
 	},

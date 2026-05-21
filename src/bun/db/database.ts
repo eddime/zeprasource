@@ -144,6 +144,9 @@ function applySchemaMigrations(database: Database): void {
 	if (!names.has("user_paused")) {
 		addColumn("ALTER TABLE migrations ADD COLUMN user_paused INTEGER NOT NULL DEFAULT 0");
 	}
+	if (!names.has("job_type")) {
+		addColumn("ALTER TABLE migrations ADD COLUMN job_type TEXT NOT NULL DEFAULT 'migrate'");
+	}
 }
 
 let db: Database | null = null;
@@ -211,7 +214,7 @@ export function listMigrations(limit = 50): MigrationRecord[] {
 	const database = getDatabase();
 	const rows = database
 		.query(
-			`SELECT id, source_email, dest_email, status, folders_total, folders_completed,
+			`SELECT id, source_email, dest_email, job_type, status, folders_total, folders_completed,
         messages_total, messages_completed, messages_failed, bytes_transferred,
         created_at, completed_at, error
        FROM migrations ORDER BY created_at DESC LIMIT ?`,
@@ -220,6 +223,7 @@ export function listMigrations(limit = 50): MigrationRecord[] {
 		id: string;
 		source_email: string;
 		dest_email: string;
+		job_type: string;
 		status: MigrationStatus;
 		folders_total: number;
 		folders_completed: number;
@@ -236,6 +240,7 @@ export function listMigrations(limit = 50): MigrationRecord[] {
 		id: row.id,
 		sourceEmail: decryptString(row.source_email) ?? row.source_email,
 		destEmail: decryptString(row.dest_email) ?? row.dest_email,
+		jobType: row.job_type === "backup" ? "backup" : "migrate",
 		status: row.status,
 		foldersTotal: row.folders_total,
 		foldersCompleted: row.folders_completed,

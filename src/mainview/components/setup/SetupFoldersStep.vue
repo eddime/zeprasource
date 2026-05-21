@@ -18,6 +18,7 @@ const localBackupEnabled = defineModel<boolean>("localBackupEnabled", { default:
 const backupParentDir = defineModel<string>("backupParentDir", { required: true });
 
 const props = defineProps<{
+	backupOnly: boolean;
 	sourceProvider: MailboxProvider;
 	destProvider: MailboxProvider;
 	loadingStats: boolean;
@@ -124,34 +125,47 @@ const durationEstimate = computed(() => {
 
 const needsPaidPlan = computed(
 	() =>
+		pricing.isReady &&
 		!props.loadingStats &&
 		selectedCount.value > 0 &&
 		selectedBytes.value > 0 &&
-		requiresPaidPlan(selectedBytes.value),
+		requiresPaidPlan(
+			selectedBytes.value,
+			pricing.activeCatalog!.freeLimitBytes,
+		),
 );
 
-const dockLoading = computed(() => props.loadingStats || props.estimatingSize);
+const dockLoading = computed(
+	() => props.estimatingSize || (!props.backupOnly && props.loadingStats),
+);
 
 const startButtonLabel = computed(() => {
-	if (props.loadingStats) return "Measuring…";
-	if (props.estimatingSize) return "Checking…";
+	if (!props.backupOnly && props.loadingStats) return "Measuring…";
+	if (props.estimatingSize) return "Starting…";
 
-	const durationSuffix = durationEstimate.value
-		? ` (~${formatDurationCompact(durationEstimate.value.secondsTypical)})`
-		: "";
+	const durationSuffix =
+		!props.loadingStats && durationEstimate.value
+			? ` (~${formatDurationCompact(durationEstimate.value.secondsTypical)})`
+			: "";
 
-	if (needsPaidPlan.value) {
-		const tier = pricing.tierForBytes(selectedBytes.value);
-		return `Start migration · ${tier.priceLabel} once${durationSuffix}`;
+	if (props.backupOnly) {
+		return `Start backup${durationSuffix}`;
+	}
+
+	if (needsPaidPlan.value && pricing.isReady) {
+		const quote = pricing.quoteForBytes(selectedBytes.value);
+		return `Start migration · ${quote.priceLabel} once${durationSuffix}`;
 	}
 
 	return `Start migration${durationSuffix}`;
 });
 
 const canStart = computed(() => {
-	if (selectedCount.value === 0 || props.estimatingSize || props.loadingStats) {
-		return false;
+	if (selectedCount.value === 0 || props.estimatingSize) return false;
+	if (props.backupOnly) {
+		return !(localBackupEnabled.value && props.backupDiskError);
 	}
+	if (props.loadingStats) return false;
 	if (localBackupEnabled.value && props.backupDiskError) return false;
 	return true;
 });
@@ -172,27 +186,33 @@ function onSelectAllChange(event: Event) {
 		<div class="folders-scroll">
 			<SetupStepHero
 				eyebrow="Step 2 of 2 · Folders"
-				title="Choose folders to migrate"
-				subline="Pick what should move."
+				:title="backupOnly ? 'Choose folders to back up' : 'Choose folders to migrate'"
+				:subline="
+					backupOnly
+						? 'Pick folders to save — sizes fill in as we measure, you can start anytime.'
+						: 'Pick what should move.'
+				"
 				show-back
 				@back="emit('back')"
 			/>
 
 			<MigrationPaidPlanNotice
+				v-if="!backupOnly"
 				:selected-bytes="selectedBytes"
 				:loading-stats="loadingStats"
 				:has-selection="selectedCount > 0"
 			/>
 
-			<section class="backup-panel" aria-labelledby="backup-heading">
+			<section
+				v-if="!backupOnly"
+				class="backup-panel"
+				aria-labelledby="backup-heading"
+			>
 				<div class="backup-inner">
 					<label class="backup-toggle">
 						<input v-model="localBackupEnabled" type="checkbox" />
 						<span class="backup-toggle-text">
-							<span class="backup-title-row">
-								<span id="backup-heading" class="backup-title">{{ BACKUP_COPY.panelTitle }}</span>
-								<span class="backup-free-badge">{{ BACKUP_COPY.freeBadge }}</span>
-							</span>
+							<span id="backup-heading" class="backup-title">{{ BACKUP_COPY.panelTitle }}</span>
 							<span class="backup-hint">{{ BACKUP_COPY.panelHint }}</span>
 						</span>
 					</label>
@@ -271,7 +291,10 @@ function onSelectAllChange(event: Event) {
 		>
 			<template v-if="estimateError || quotaWarning || backupDiskError" #top>
 				<p v-if="estimateError" class="dock-error">{{ estimateError }}</p>
-				<p v-else-if="backupDiskError && localBackupEnabled" class="dock-error">
+				<p
+					v-else-if="backupDiskError && (localBackupEnabled || backupOnly)"
+					class="dock-error"
+				>
 					{{ backupDiskError }}
 				</p>
 				<p v-else-if="quotaWarning" class="dock-warning">{{ quotaWarning }}</p>
@@ -337,28 +360,10 @@ function onSelectAllChange(event: Event) {
 	min-width: 0;
 }
 
-.backup-title-row {
-	display: flex;
-	align-items: center;
-	flex-wrap: wrap;
-	gap: 0.4rem;
-}
-
 .backup-title {
 	font-size: 0.88rem;
 	font-weight: 700;
 	letter-spacing: -0.02em;
-}
-
-.backup-free-badge {
-	font-size: 0.62rem;
-	font-weight: 800;
-	letter-spacing: 0.04em;
-	text-transform: uppercase;
-	padding: 0.15rem 0.45rem;
-	border-radius: 999px;
-	background: rgba(13, 148, 136, 0.14);
-	color: #0f766e;
 }
 
 .backup-hint {

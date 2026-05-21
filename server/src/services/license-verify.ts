@@ -1,6 +1,7 @@
 import { hashFolderSelection } from "../shared/migration-payment";
-import { getPricingTier } from "../shared/pricing";
+import { billableGigabytes } from "../shared/pricing";
 import { parseMigrationLaunchTicket } from "./launch-ticket";
+import { getMigrationPricingCatalog } from "./pricing-catalog";
 
 export type LicenseVerifyBody = {
 	launchTicket: string;
@@ -9,11 +10,16 @@ export type LicenseVerifyBody = {
 	messageCount: number;
 };
 
-export function verifyMigrationLicense(body: LicenseVerifyBody): {
+export async function verifyMigrationLicense(body: LicenseVerifyBody): Promise<{
 	valid: true;
 	stripeSessionId: string;
-	tierId: string;
-} {
+	billableGb: number;
+}> {
+	const catalog = await getMigrationPricingCatalog();
+	if (!catalog.configured) {
+		throw new Error("Stripe pricing is not configured.");
+	}
+
 	const payload = parseMigrationLaunchTicket(body.launchTicket);
 	const folderPathsHash = hashFolderSelection(body.folderPaths);
 
@@ -27,13 +33,16 @@ export function verifyMigrationLicense(body: LicenseVerifyBody): {
 		);
 	}
 
-	if (getPricingTier(body.totalBytes).id !== payload.tier) {
-		throw new Error("License tier does not match the current mailbox size.");
+	if (
+		payload.gb !==
+		billableGigabytes(body.totalBytes, catalog.freeLimitBytes)
+	) {
+		throw new Error("License does not match the billed gigabytes.");
 	}
 
 	return {
 		valid: true,
 		stripeSessionId: payload.sid,
-		tierId: payload.tier,
+		billableGb: payload.gb,
 	};
 }

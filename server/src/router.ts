@@ -15,9 +15,17 @@ import {
 } from "./services/checkout";
 import { verifyMigrationLicense } from "./services/license-verify";
 import type { MigrationCheckoutCreateBody } from "./shared/stripe-checkout";
-import { getMigrationPricingCatalog } from "./services/pricing-catalog";
 import type { LicenseVerifyBody } from "./services/license-verify";
+import {
+	createLifetimeCheckoutSession,
+	getLifetimeCheckoutStatus,
+	handleLifetimeCheckoutWebhook,
+} from "./services/lifetime-checkout";
+import type { LifetimeVerifyBody } from "./services/lifetime-verify";
+import { verifyLifetimeLicense } from "./services/lifetime-verify";
+import { getZepraPricingCatalog } from "./services/zepra-pricing-catalog";
 import { createStripeClient } from "./stripe-client";
+import { STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME } from "./shared/stripe-checkout";
 
 export async function handleRequest(req: Request): Promise<Response> {
 	const preflight = corsPreflight(req);
@@ -38,7 +46,7 @@ export async function handleRequest(req: Request): Promise<Response> {
 		}
 
 		if (req.method === "GET" && path === "/v1/pricing/catalog") {
-			const catalog = await getMigrationPricingCatalog();
+			const catalog = await getZepraPricingCatalog();
 			return withCors(jsonResponse(catalog));
 		}
 
@@ -78,7 +86,39 @@ export async function handleRequest(req: Request): Promise<Response> {
 
 		if (req.method === "POST" && path === "/v1/licenses/verify") {
 			const body = await readJsonBody<LicenseVerifyBody>(req);
-			const result = verifyMigrationLicense(body);
+			const result = await verifyMigrationLicense(body);
+			return withCors(jsonResponse(result));
+		}
+
+		if (req.method === "POST" && path === "/v1/checkout/lifetime-sessions") {
+			if (!isStripeConfigured()) {
+				return withCors(
+					errorResponse("Stripe is not configured on the server.", 503),
+				);
+			}
+			const session = await createLifetimeCheckoutSession();
+			return withCors(jsonResponse(session, 201));
+		}
+
+		if (req.method === "GET" && path.startsWith("/v1/checkout/lifetime-sessions/")) {
+			if (!isStripeConfigured()) {
+				return withCors(
+					errorResponse("Stripe is not configured on the server.", 503),
+				);
+			}
+			const sessionId = decodeURIComponent(
+				path.slice("/v1/checkout/lifetime-sessions/".length),
+			);
+			if (!sessionId.startsWith("cs_")) {
+				return withCors(errorResponse("Invalid checkout session id."));
+			}
+			const status = await getLifetimeCheckoutStatus(sessionId);
+			return withCors(jsonResponse(status));
+		}
+
+		if (req.method === "POST" && path === "/v1/lifetime/verify") {
+			const body = await readJsonBody<LifetimeVerifyBody>(req);
+			const result = await verifyLifetimeLicense(body);
 			return withCors(jsonResponse(result));
 		}
 
@@ -114,7 +154,13 @@ async function handleStripeWebhook(req: Request): Promise<Response> {
 
 	if (event.type === "checkout.session.completed") {
 		const session = event.data.object as Stripe.Checkout.Session;
-		await handleCheckoutCompletedWebhook(session);
+		if (
+			session.metadata?.pricing_model === STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME
+		) {
+			await handleLifetimeCheckoutWebhook(session);
+		} else {
+			await handleCheckoutCompletedWebhook(session);
+		}
 	}
 
 	return jsonResponse({ received: true });

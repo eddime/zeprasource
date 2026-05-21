@@ -1,5 +1,4 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import type { PaidMigrationTierId } from "../../../shared/stripe-checkout";
 import { getStripeSecretKey } from "./stripe-config";
 
 const TICKET_VERSION = 1;
@@ -9,7 +8,8 @@ export type MigrationLaunchTicketPayload = {
 	v: typeof TICKET_VERSION;
 	jti: string;
 	sid: string;
-	tier: PaidMigrationTierId;
+	/** Billed gigabytes paid for (Stripe line item quantity). */
+	gb: number;
 	bytes: number;
 	msgs: number;
 	fhash: string;
@@ -46,7 +46,7 @@ function sign(encodedPayload: string): string {
 /** Opaque license returned to the UI after Stripe checkout — cannot be forged without the server secret. */
 export function issueMigrationLaunchTicket(input: {
 	stripeSessionId: string;
-	tierId: PaidMigrationTierId;
+	billableGb: number;
 	totalBytes: number;
 	messageCount: number;
 	folderPathsHash: string;
@@ -56,7 +56,7 @@ export function issueMigrationLaunchTicket(input: {
 		v: TICKET_VERSION,
 		jti: randomUUID(),
 		sid: input.stripeSessionId,
-		tier: input.tierId,
+		gb: input.billableGb,
 		bytes: input.totalBytes,
 		msgs: input.messageCount,
 		fhash: input.folderPathsHash,

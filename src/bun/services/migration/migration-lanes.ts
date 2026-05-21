@@ -105,14 +105,34 @@ async function transferMessage(
 	mapping: FolderMapping,
 	msg: FetchedMigrationMessage,
 	transfer: MigrationTransferConfig,
-	destClient: Awaited<ReturnType<typeof createImapClient>>,
+	destClient: Awaited<ReturnType<typeof createImapClient>> | null,
 	destMessageIds: Set<string>,
 	duplicateLock: ReturnType<typeof createAsyncMutex>,
 	backupAccountDir: string | null,
 	markMessage: MarkMessageFn,
 	hooks: FolderTransferHooks,
+	backupOnly: boolean,
 ): Promise<void> {
 	const { uid, source, flags, internalDate, messageId } = msg;
+
+	if (backupOnly) {
+		if (!backupAccountDir) {
+			throw new Error("Backup folder is not configured.");
+		}
+		const backupResult = await writeBackupMessage({
+			accountDir: backupAccountDir,
+			folderPath: mapping.sourcePath,
+			uid,
+			source,
+		});
+		if (backupResult.status === "failed") {
+			throw new Error(backupResult.error);
+		}
+		const size = source.byteLength;
+		markMessage(db, migrationId, mapping.sourcePath, uid, "completed", size, messageId);
+		hooks.onMessageCompleted(uid, size);
+		return;
+	}
 
 	let reservedMessageIdKey: string | undefined;
 	if (transfer.skipDuplicates && messageId) {
@@ -133,7 +153,7 @@ async function transferMessage(
 	const flagList = transfer.preserveFlags ? flagsToArray(flags) : undefined;
 	try {
 		await withTimeout(
-			appendMessage(destClient, mapping.destPath, source, {
+			appendMessage(destClient!, mapping.destPath, source, {
 				flags: flagList,
 				internalDate,
 			}),
@@ -181,6 +201,7 @@ async function runMigrationLane(options: {
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
 	backupAccountDir: string | null;
+	backupOnly: boolean;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
@@ -195,15 +216,16 @@ async function runMigrationLane(options: {
 		destMessageIds,
 		duplicateLock,
 		backupAccountDir,
+		backupOnly,
 		markMessage,
 		hooks,
 	} = options;
 
 	const sourceClient = await createImapClient(sourceCreds);
-	const destClient = await createImapClient(destCreds);
+	const destClient = backupOnly ? null : await createImapClient(destCreds);
 	try {
 		await sourceClient.connect();
-		await destClient.connect();
+		if (destClient) await destClient.connect();
 
 		let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
 		for (let i = 0; i < uids.length; i += MIGRATION_FETCH_BATCH_SIZE) {
@@ -242,6 +264,7 @@ async function runMigrationLane(options: {
 						backupAccountDir,
 						markMessage,
 						hooks,
+						backupOnly,
 					});
 				}
 				continue;
@@ -268,6 +291,7 @@ async function runMigrationLane(options: {
 						backupAccountDir,
 						markMessage,
 						hooks,
+						backupOnly,
 					});
 					continue;
 				}
@@ -284,6 +308,7 @@ async function runMigrationLane(options: {
 					backupAccountDir,
 					markMessage,
 					hooks,
+					backupOnly,
 				});
 			}
 			hooks.onBatchFinished?.();
@@ -314,13 +339,14 @@ async function processFetchedWithRetries(options: {
 	migrationId: string;
 	mapping: FolderMapping;
 	msg: FetchedMigrationMessage;
-	destClient: Awaited<ReturnType<typeof createImapClient>>;
+	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
 	backupAccountDir: string | null;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
+	backupOnly: boolean;
 }): Promise<void> {
 	const { msg, transfer, hooks, markMessage, db, migrationId, mapping } = options;
 	let attempt = 0;
@@ -342,6 +368,7 @@ async function processFetchedWithRetries(options: {
 				options.backupAccountDir,
 				markMessage,
 				hooks,
+				options.backupOnly,
 			);
 			return;
 		} catch (error) {
@@ -396,13 +423,14 @@ async function processUidWithRetries(options: {
 	mapping: FolderMapping;
 	uid: number;
 	sourceClient: Awaited<ReturnType<typeof createImapClient>>;
-	destClient: Awaited<ReturnType<typeof createImapClient>>;
+	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
 	duplicateLock: ReturnType<typeof createAsyncMutex>;
 	backupAccountDir: string | null;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
+	backupOnly: boolean;
 }): Promise<void> {
 	let msg: FetchedMigrationMessage | undefined;
 	for (let fetchAttempt = 0; fetchAttempt < 12; fetchAttempt++) {
@@ -446,6 +474,7 @@ async function processUidWithRetries(options: {
 		backupAccountDir: options.backupAccountDir,
 		markMessage: options.markMessage,
 		hooks: options.hooks,
+		backupOnly: options.backupOnly,
 	});
 }
 
@@ -455,10 +484,11 @@ export async function transferFolderWithLanes(options: {
 	mapping: FolderMapping;
 	sourceCreds: MailboxCredentials;
 	destCreds: MailboxCredentials;
-	destClient: Awaited<ReturnType<typeof createImapClient>>;
+	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
 	pendingUids: number[];
 	transfer: MigrationTransferConfig;
 	backupRootPath: string | null;
+	backupOnly: boolean;
 	markMessage: MarkMessageFn;
 	hooks: FolderTransferHooks;
 }): Promise<void> {
@@ -472,15 +502,17 @@ export async function transferFolderWithLanes(options: {
 		pendingUids,
 		transfer,
 		backupRootPath: backupAccountDir,
+		backupOnly,
 		markMessage,
 		hooks,
 	} = options;
 
 	if (pendingUids.length === 0) return;
 
-	const destMessageIds = transfer.skipDuplicates
-		? await buildDestinationMessageIdIndex(destClient, mapping.destPath)
-		: new Set<string>();
+	const destMessageIds =
+		!backupOnly && transfer.skipDuplicates && destClient
+			? await buildDestinationMessageIdIndex(destClient, mapping.destPath)
+			: new Set<string>();
 	const duplicateLock = createAsyncMutex();
 	const shards = shardUids(pendingUids, transfer.parallelConnections);
 
@@ -497,6 +529,7 @@ export async function transferFolderWithLanes(options: {
 				destMessageIds,
 				duplicateLock,
 				backupAccountDir,
+				backupOnly,
 				markMessage,
 				hooks,
 			}),

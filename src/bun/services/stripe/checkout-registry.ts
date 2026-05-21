@@ -1,10 +1,8 @@
-import type { PaidMigrationTierId } from "../../../shared/stripe-checkout";
-
 export type CheckoutRegistryStatus = "pending" | "paid" | "cancelled";
 
 type RegistryEntry = {
 	status: CheckoutRegistryStatus;
-	tierId: PaidMigrationTierId;
+	billableGb: number;
 	totalBytes: number;
 	messageCount: number;
 	folderPaths: string[];

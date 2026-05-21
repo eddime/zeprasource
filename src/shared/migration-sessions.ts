@@ -1,3 +1,4 @@
+import { isLocalBackupDestEmail } from "./migration-job";
 import type { MigrationProgress, MigrationRecord, MigrationStatus } from "./types";
 
 export type SessionCardStatus = "running" | "paused" | "failed" | "completed" | "cancelled";
@@ -70,10 +71,15 @@ export function toSessionCard(
 ): SessionCardModel {
 	const status = record.status as SessionCardStatus;
 	const isActive = ACTIVE_STATUSES.includes(record.status);
+	const destEmail =
+		record.jobType === "backup" || isLocalBackupDestEmail(record.destEmail)
+			? "Mac backup"
+			: record.destEmail;
+
 	return {
 		id: record.id,
 		sourceEmail: record.sourceEmail,
-		destEmail: record.destEmail,
+		destEmail,
 		status,
 		percent: isActive ? migrationPercent(progress ?? undefined) : undefined,
 		meta: isActive ? undefined : formatSessionMeta(record),

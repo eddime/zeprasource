@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type {
 	FolderMapping,
 	MailboxCredentials,
+	MigrationJobType,
 	MigrationProgress,
 	MigrationStatus,
 } from "../../../shared/types";
@@ -42,7 +43,7 @@ import {
 	recordAutopilotRetry,
 	type MigrationAutopilotState,
 } from "./migration-autopilot";
-import { verifyMigrationMailboxes } from "./migration-preflight";
+import { verifyMigrationMailboxes, verifySourceMailbox } from "./migration-preflight";
 import {
 	burnMigrationLaunchTicket,
 	type VerifiedLaunchLicense,
@@ -58,6 +59,7 @@ import {
 } from "./migration-failure-sweeper";
 import {
 	loadMigrationResumePayload,
+	localBackupPlaceholderDestination,
 	snapshotMigrationMailboxes,
 } from "./migration-resume";
 import {
@@ -126,6 +128,7 @@ function emitLiveProgress(
 
 interface MigrationContext {
 	migrationId: string;
+	jobType: MigrationJobType;
 	source: MailboxCredentials;
 	destination: MailboxCredentials;
 	folderMappings: FolderMapping[];
@@ -200,6 +203,7 @@ type StartMigrationParams = {
 	destination?: MailboxCredentials;
 	folderMappings?: FolderMapping[];
 	backupRootPath?: string | null;
+	jobType?: MigrationJobType;
 	resumeMigrationId?: string;
 	plannedSecondsTypical?: number;
 	verifiedLicense?: VerifiedLaunchLicense | null;
@@ -228,14 +232,23 @@ export async function prepareMigrationStart(
 		source = payload.source;
 		destination = payload.destination;
 		selectedMappings = payload.folderMappings;
-	} else if (!source || !destination || selectedMappings.length === 0) {
-		throw new Error("Source, destination, and folder mappings are required.");
+	} else {
+		const jobType = params.jobType ?? "migrate";
+		if (jobType === "backup") {
+			if (!source || !params.backupRootPath?.trim() || selectedMappings.length === 0) {
+				throw new Error("Source mailbox, backup folder, and folders are required.");
+			}
+			destination = localBackupPlaceholderDestination();
+		} else if (!source || !destination || selectedMappings.length === 0) {
+			throw new Error("Source, destination, and folder mappings are required.");
+		}
 	}
 
 	if (!params.resumeMigrationId) {
 		const sourceRef = `migration/${migrationId}/source`;
 		const destRef = `migration/${migrationId}/destination`;
 		const license = params.verifiedLicense ?? null;
+		const jobType = params.jobType ?? "migrate";
 
 		const backupStored = params.backupRootPath?.trim()
 			? encryptString(params.backupRootPath.trim())
@@ -246,14 +259,14 @@ export async function prepareMigrationStart(
         id, source_profile_id, dest_profile_id, source_email, dest_email,
         status, folders_total, folder_mappings, started_at, updated_at,
         stripe_session_id, license_jti, licensed_total_bytes, license_folder_hash,
-        backup_root_path
-      ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, datetime('now'), datetime('now'), ?, ?, ?, ?, ?)`,
+        backup_root_path, job_type
+      ) VALUES (?, ?, ?, ?, ?, 'running', ?, ?, datetime('now'), datetime('now'), ?, ?, ?, ?, ?, ?)`,
 		).run(
 			migrationId,
 			sourceRef,
 			destRef,
-			encryptString(source.email),
-			encryptString(destination.email),
+			encryptString(source!.email),
+			encryptString(destination!.email),
 			selectedMappings.length,
 			encryptString(JSON.stringify(selectedMappings)),
 			license?.stripeSessionId ?? null,
@@ -261,16 +274,17 @@ export async function prepareMigrationStart(
 			license?.totalBytes ?? null,
 			license?.folderPathsHash ?? null,
 			backupStored,
+			jobType,
 		);
 
 		if (license) {
 			burnMigrationLaunchTicket(license, migrationId);
 		}
 
-		snapshotMigrationMailboxes(migrationId, source, destination);
+		snapshotMigrationMailboxes(migrationId, source!, destination!);
 		seedMigrationFolderTotals(migrationId, selectedMappings);
 	} else {
-		snapshotMigrationMailboxes(migrationId, source, destination);
+		snapshotMigrationMailboxes(migrationId, source!, destination!);
 		db.prepare(
 			`UPDATE migrations SET status = 'running', error = NULL, updated_at = datetime('now') WHERE id = ?`,
 		).run(migrationId);
@@ -297,6 +311,7 @@ export async function executeMigration(
 
 	const ctx: MigrationContext = {
 		migrationId,
+		jobType: payload.jobType,
 		source: payload.source,
 		destination: payload.destination,
 		folderMappings: payload.folderMappings,
@@ -312,15 +327,20 @@ export async function executeMigration(
 
 	const db = getDatabase();
 	const { source, destination, folderMappings: selectedMappings } = ctx;
+	const backupOnly = ctx.jobType === "backup";
 
-	await verifyMigrationMailboxes(source, destination);
+	if (backupOnly) {
+		await verifySourceMailbox(source);
+	} else {
+		await verifyMigrationMailboxes(source, destination);
+	}
 
 	const sourceClient = await createImapClient(source);
-	const destClient = await createImapClient(destination);
+	const destClient = backupOnly ? null : await createImapClient(destination);
 
 	try {
 		await sourceClient.connect();
-		await destClient.connect();
+		if (destClient) await destClient.connect();
 
 		syncMigrationCounters(migrationId);
 		const baseline = getMigrationProgressSnapshot(migrationId, "running", undefined, {
@@ -463,7 +483,9 @@ export async function executeMigration(
 				activityLabel: describeScanningActivity(mapping.sourcePath),
 			});
 
-			await ensureFolderExists(destClient, mapping.destPath);
+			if (destClient) {
+				await ensureFolderExists(destClient, mapping.destPath);
+			}
 
 			const folderRow = db
 				.query(
@@ -535,6 +557,7 @@ export async function executeMigration(
 				pendingUids,
 				transfer: getTransferConfig(ctx.autopilot),
 				backupRootPath: ctx.backupRootPath,
+				backupOnly,
 				markMessage: markMigrationMessage,
 				hooks: transferHooks(mapping),
 			});
@@ -624,6 +647,7 @@ export async function executeMigration(
 					destClient,
 					transfer: getTransferConfig(ctx.autopilot),
 					backupRootPath: ctx.backupRootPath,
+					backupOnly,
 					markMessage: markMigrationMessage,
 					hooksForMapping: (mapping) => transferHooks(mapping),
 				});
@@ -709,7 +733,7 @@ export async function executeMigration(
 		activeMigrations.delete(migrationId);
 		activeMigrationSlots.delete(migrationId);
 		await safeCloseImapClient(sourceClient);
-		await safeCloseImapClient(destClient);
+		if (destClient) await safeCloseImapClient(destClient);
 	}
 }
 
@@ -729,6 +753,13 @@ export async function enqueueMigration(
 	void executeMigration(migrationId, emit).catch((error) => {
 		const msg = error instanceof Error ? error.message : String(error);
 		logger.error("migration", `Migration ${migrationId} failed`, msg);
+		const failed = getMigrationProgressSnapshot(
+			migrationId,
+			"failed",
+			{ error: msg },
+			{ reconcile: false },
+		);
+		if (failed) emit(failed);
 	});
 	return migrationId;
 }

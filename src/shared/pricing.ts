@@ -1,89 +1,131 @@
 /**
- * Tier limits (GB). Logic: ≤10 Trot, ≤25 Gallop, >25 Stampede.
- * Prices are loaded from Stripe at runtime — see migration-pricing-catalog.
+ * Linear migration pricing: free tier + per billed gigabyte.
+ * Unit price and free limit come from Stripe — see migration-pricing-catalog.
  */
-import type {
-	MigrationPriceLabels,
-	MigrationPricingPlan,
-} from "./migration-pricing-catalog";
+import type { MigrationPricingCatalog } from "./migration-pricing-catalog";
 
-export const PRICING_TIER_LIMITS_GB = {
-	free: 2,
-	starter: 10,
-	plus: 25,
-	pro: 25,
-} as const;
-
-/** Used when Stripe is unavailable (offline / missing key). */
-export const FALLBACK_MIGRATION_PRICE_LABELS: MigrationPriceLabels = {
-	free: "€0",
-	starter: "€9",
-	plus: "€14",
-	pro: "€29",
-};
-
-/** @deprecated Use FALLBACK_MIGRATION_PRICE_LABELS */
-export const PRICING_TIER_PRICES = {
-	starter: FALLBACK_MIGRATION_PRICE_LABELS.starter,
-	plus: FALLBACK_MIGRATION_PRICE_LABELS.plus,
-	pro: FALLBACK_MIGRATION_PRICE_LABELS.pro,
-} as const;
-
-export const FREE_MIGRATION_LIMIT_BYTES = PRICING_TIER_LIMITS_GB.free * 1024 ** 3;
-
-export interface MigrationPricingTier {
-	id: string;
-	name: string;
+export interface MigrationPricingQuote {
+	id: "free" | "paid";
+	billableGb: number;
 	priceLabel: string;
+	/** e.g. "8 GB × $0.75" */
+	formulaLabel: string | null;
 	hint: string;
-	/** Shown on pricing sheet — conversion-focused copy */
-	tagline?: string;
 }
 
-const TIER_PLAN_META: Array<
-	Omit<MigrationPricingPlan, "priceLabel"> & { id: keyof MigrationPriceLabels }
-> = [
-	{
-		id: "free",
-		name: "Foal",
-		tagline: "First steps on the savanna",
-		hint: "Up to 2 GB per migration",
-		sizeLabel: `Up to ${PRICING_TIER_LIMITS_GB.free} GB`,
-	},
-	{
-		id: "starter",
-		name: "Trot",
-		tagline: "Everyday mailbox crossing",
-		hint: "One-time · less than a coffee",
-		sizeLabel: `Up to ${PRICING_TIER_LIMITS_GB.starter} GB`,
-	},
-	{
-		id: "plus",
-		name: "Gallop",
-		tagline: "Full herd of folders",
-		hint: "One-time · best value per GB",
-		sizeLabel: `Up to ${PRICING_TIER_LIMITS_GB.plus} GB`,
-	},
-	{
-		id: "pro",
-		name: "Stampede",
-		tagline: "The great migration",
-		hint: "One-time · decade of mail",
-		sizeLabel: `Over ${PRICING_TIER_LIMITS_GB.pro} GB`,
-	},
-];
-
-export function buildPricingPlans(
-	priceLabels: MigrationPriceLabels = FALLBACK_MIGRATION_PRICE_LABELS,
-): MigrationPricingPlan[] {
-	return TIER_PLAN_META.map((plan) => ({
-		...plan,
-		priceLabel: priceLabels[plan.id],
-	}));
+export function billableGigabytes(
+	totalBytes: number,
+	freeLimitBytes: number,
+): number {
+	const over = Math.max(0, totalBytes - freeLimitBytes);
+	if (over === 0) return 0;
+	return Math.ceil(over / 1024 ** 3);
 }
 
-/** @deprecated Prefer buildPricingPlans() with live Stripe labels from the pricing store. */
-export const PRICING_PLANS = buildPricingPlans();
+export function migrationChargeCents(
+	totalBytes: number,
+	pricePerGbCents: number,
+	freeLimitBytes: number,
+): number {
+	return billableGigabytes(totalBytes, freeLimitBytes) * pricePerGbCents;
+}
+
+export function formatMoney(cents: number, currency: string): string {
+	const value = cents / 100;
+	const code = currency.toLowerCase();
+	const hasFraction = cents % 100 !== 0;
+	const digits = hasFraction ? 2 : 0;
+	if (code === "eur") {
+		const num = value.toLocaleString("de-DE", {
+			minimumFractionDigits: digits,
+			maximumFractionDigits: digits,
+		});
+		return `€${num}`;
+	}
+	if (code === "usd") {
+		return new Intl.NumberFormat("en-US", {
+			style: "currency",
+			currency: "USD",
+			minimumFractionDigits: digits,
+			maximumFractionDigits: 2,
+		}).format(value);
+	}
+	return new Intl.NumberFormat("en-US", {
+		style: "currency",
+		currency: code.toUpperCase(),
+		minimumFractionDigits: digits,
+		maximumFractionDigits: 2,
+	}).format(value);
+}
+
+export function formatPricePerGbLabel(cents: number, currency: string): string {
+	return `${formatMoney(cents, currency)} / GB`;
+}
+
+/** One-time price label (e.g. Lifetime). */
+export function formatPriceLabel(cents: number, currency: string): string {
+	return formatMoney(cents, currency);
+}
+
+export function requiresPaidPlan(
+	totalBytes: number,
+	freeLimitBytes: number,
+): boolean {
+	return totalBytes > freeLimitBytes;
+}
+
+export function assertBillableGbMatchesEstimate(
+	billableGb: number,
+	totalBytes: number,
+	freeLimitBytes: number,
+): void {
+	const expected = billableGigabytes(totalBytes, freeLimitBytes);
+	if (billableGb !== expected) {
+		throw new Error(
+			`Billable GB mismatch (expected ${expected}, got ${billableGb}).`,
+		);
+	}
+}
+
+export function getMigrationPricingQuote(
+	totalBytes: number,
+	catalog: MigrationPricingCatalog,
+): MigrationPricingQuote {
+	if (!catalog.configured) {
+		throw new Error("Stripe pricing is not configured.");
+	}
+
+	const billableGb = billableGigabytes(totalBytes, catalog.freeLimitBytes);
+
+	if (billableGb === 0) {
+		return {
+			id: "free",
+			billableGb: 0,
+			priceLabel: formatMoney(0, catalog.currency),
+			formulaLabel: null,
+			hint: `Up to ${catalog.freeLimitGb} GB per migration`,
+		};
+	}
+
+	const cents = billableGb * catalog.pricePerGbCents;
+	const unitLabel = formatMoney(catalog.pricePerGbCents, catalog.currency);
+
+	return {
+		id: "paid",
+		billableGb,
+		priceLabel: formatMoney(cents, catalog.currency),
+		formulaLabel: `${billableGb} GB × ${unitLabel}`,
+		hint: "One-time payment for this migration run",
+	};
+}
+
+/** @deprecated Use getMigrationPricingQuote */
+export function getPricingTier(
+	totalBytes: number,
+	catalog: MigrationPricingCatalog,
+): MigrationPricingQuote {
+	return getMigrationPricingQuote(totalBytes, catalog);
+}
 
 export function formatBytes(bytes: number): string {
 	if (bytes < 1024) return `${bytes} B`;
@@ -92,48 +134,67 @@ export function formatBytes(bytes: number): string {
 	return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
 }
 
-export function requiresPaidPlan(totalBytes: number): boolean {
-	return totalBytes > FREE_MIGRATION_LIMIT_BYTES;
+/** Overage above the free tier — always in GB for pricing math readability. */
+export function formatOverageGb(bytes: number): string {
+	const gb = bytes / 1024 ** 3;
+	if (gb < 0.01) return `${gb.toFixed(3)} GB`;
+	if (gb < 10) return `${gb.toFixed(2)} GB`;
+	return `${gb.toFixed(1)} GB`;
 }
 
-export function getPricingTier(
-	totalBytes: number,
-	priceLabels: MigrationPriceLabels = FALLBACK_MIGRATION_PRICE_LABELS,
-): MigrationPricingTier {
-	const gb = totalBytes / 1024 ** 3;
-	const { free, starter, plus, pro } = PRICING_TIER_LIMITS_GB;
+export type BillableBreakdown = {
+	totalLabel: string;
+	overLabel: string;
+	billableGb: number;
+	unitPriceLabel: string;
+	priceLabel: string;
+	/** e.g. "+0.94 GB → 1 GB × $0.75" */
+	chargeLine: string;
+};
 
-	if (gb <= free) {
-		return {
-			id: "free",
-			name: "Foal",
-			priceLabel: priceLabels.free,
-			hint: `Up to ${free} GB per migration`,
-		};
-	}
-	if (gb <= starter) {
-		return {
-			id: "starter",
-			name: "Trot",
-			priceLabel: priceLabels.starter,
-			tagline: "Everyday mailbox crossing",
-			hint: "One-time migration license",
-		};
-	}
-	if (gb <= plus) {
-		return {
-			id: "plus",
-			name: "Gallop",
-			priceLabel: priceLabels.plus,
-			tagline: "Full herd of folders",
-			hint: "One-time migration license",
-		};
-	}
+/** Readable split: total size, bytes over free tier, billed GB (rounded). */
+export function getBillableBreakdown(
+	totalBytes: number,
+	catalog: MigrationPricingCatalog,
+): BillableBreakdown | null {
+	const quote = getMigrationPricingQuote(totalBytes, catalog);
+	if (quote.id === "free") return null;
+
+	const unitLabel = formatMoney(catalog.pricePerGbCents, catalog.currency);
+	const overBytes = Math.max(0, totalBytes - catalog.freeLimitBytes);
+	const overLabel = formatOverageGb(overBytes);
+	const overGb = overBytes / 1024 ** 3;
+	const billedPart = `${quote.billableGb} GB × ${unitLabel}`;
+	const roundsUp = quote.billableGb > overGb + 0.005;
+
+	const chargeLine = roundsUp
+		? `+${overLabel} → ${billedPart}`
+		: `+${quote.billableGb} GB × ${unitLabel}`;
+
 	return {
-		id: "pro",
-		name: "Stampede",
-		priceLabel: priceLabels.pro,
-		tagline: "The great migration",
-		hint: "Large mailbox · one-time license",
+		totalLabel: formatBytes(totalBytes),
+		overLabel,
+		billableGb: quote.billableGb,
+		unitPriceLabel: unitLabel,
+		priceLabel: quote.priceLabel,
+		chargeLine,
 	};
+}
+
+/** Example totals for the pricing sheet (fixed mailbox sizes). */
+export function buildPricingExamples(
+	catalog: MigrationPricingCatalog,
+): Array<{ sizeGb: number; priceLabel: string; detail: string }> {
+	const sizes = [10, 25, 50];
+	return sizes.map((sizeGb) => {
+		const bytes = sizeGb * 1024 ** 3;
+		const quote = getMigrationPricingQuote(bytes, catalog);
+		return {
+			sizeGb,
+			priceLabel: quote.priceLabel,
+			detail:
+				quote.formulaLabel ??
+				`Up to ${catalog.freeLimitGb} GB free`,
+		};
+	});
 }

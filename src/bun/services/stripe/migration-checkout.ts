@@ -4,15 +4,13 @@ import {
 	type MigrationCheckoutCreateParams,
 	type MigrationCheckoutCreateResult,
 	type MigrationCheckoutWaitResult,
-	type PaidMigrationTierId,
 } from "../../../shared/stripe-checkout";
 import { hashFolderSelection } from "../../../shared/migration-payment";
-import { getPricingTier } from "../../../shared/pricing";
+import { assertBillableGbMatchesEstimate } from "../../../shared/pricing";
 import { grantMigrationLaunchTicket } from "./migration-payment-entitlements";
 import {
 	getStripeSecretKey,
 	isStripeConfigured,
-	lookupKeyForTier,
 	paymentReturnBase,
 	ZEPRA_PAYMENT_URL_SCHEME,
 } from "./stripe-config";
@@ -23,6 +21,7 @@ import {
 	registerCheckoutSession,
 	removeCheckoutSession,
 } from "./checkout-registry";
+import { getMigrationPricingCatalog } from "./migration-pricing-catalog";
 
 const POLL_INTERVAL_MS = 1500;
 const WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -33,37 +32,6 @@ function createStripeClient(): Stripe {
 		throw new Error("STRIPE_SECRET_KEY is not configured");
 	}
 	return new Stripe(secretKey);
-}
-
-async function resolvePriceId(
-	stripe: Stripe,
-	tierId: PaidMigrationTierId,
-): Promise<string> {
-	const lookupKey = lookupKeyForTier(tierId);
-	const prices = await stripe.prices.list({
-		lookup_keys: [lookupKey],
-		limit: 1,
-		active: true,
-	});
-	const price = prices.data[0];
-	if (!price?.id) {
-		throw new Error(
-			`Stripe price not found for tier "${tierId}" (lookup_key: ${lookupKey}).`,
-		);
-	}
-	return price.id;
-}
-
-function assertTierMatchesEstimate(
-	tierId: PaidMigrationTierId,
-	totalBytes: number,
-): void {
-	const expected = getPricingTier(totalBytes);
-	if (expected.id !== tierId) {
-		throw new Error(
-			`Pricing tier mismatch (expected ${expected.id}, got ${tierId}).`,
-		);
-	}
 }
 
 export function isMigrationCheckoutConfigured(): boolean {
@@ -77,24 +45,39 @@ export async function createMigrationCheckout(
 		return { configured: false, reason: "missing_secret_key" };
 	}
 
-	assertTierMatchesEstimate(params.tierId, params.totalBytes);
+	const catalog = await getMigrationPricingCatalog();
+	if (!catalog.configured || !catalog.priceId) {
+		throw new Error(
+			catalog.error === "stripe_not_configured"
+				? "STRIPE_SECRET_KEY is not configured."
+				: "Stripe migration pricing is not configured. Check the per-GB price and free_migration_gb metadata.",
+		);
+	}
+
+	assertBillableGbMatchesEstimate(
+		params.billableGb,
+		params.totalBytes,
+		catalog.freeLimitBytes,
+	);
 
 	const stripe = createStripeClient();
-	const priceId = await resolvePriceId(stripe, params.tierId);
 	const base = paymentReturnBase();
 
 	const session = await stripe.checkout.sessions.create({
 		mode: "payment",
 		payment_method_types: [...MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES],
-		line_items: [{ price: priceId, quantity: 1 }],
+		line_items: [{ price: catalog.priceId, quantity: params.billableGb }],
 		success_url: `${base}/success?session_id={CHECKOUT_SESSION_ID}`,
 		cancel_url: `${base}/cancel?session_id={CHECKOUT_SESSION_ID}`,
 		metadata: {
-			tier_id: params.tierId,
+			pricing_model: "per_gb",
+			billable_gb: String(params.billableGb),
 			total_bytes: String(params.totalBytes),
 			message_count: String(params.messageCount),
 			folder_count: String(params.folderCount),
 			folder_paths_hash: hashFolderSelection(params.folderPaths),
+			free_migration_gb: String(catalog.freeLimitGb),
+			stripe_price_id: catalog.priceId,
 		},
 	});
 
@@ -103,7 +86,7 @@ export async function createMigrationCheckout(
 	}
 
 	registerCheckoutSession(session.id, {
-		tierId: params.tierId,
+		billableGb: params.billableGb,
 		totalBytes: params.totalBytes,
 		messageCount: params.messageCount,
 		folderPaths: params.folderPaths,
@@ -126,6 +109,7 @@ export function handlePaymentReturnUrl(url: string): void {
 
 	if (parsed.protocol !== `${ZEPRA_PAYMENT_URL_SCHEME}:`) return;
 	if (!parsed.pathname.startsWith("/payment")) return;
+	if (parsed.pathname.startsWith("/payment/lifetime")) return;
 
 	const sessionId = parsed.searchParams.get("session_id");
 	if (!sessionId) return;
@@ -150,7 +134,7 @@ async function completePaidCheckout(
 
 	const launchTicket = await grantMigrationLaunchTicket({
 		sessionId,
-		tierId: entry.tierId,
+		billableGb: entry.billableGb,
 		totalBytes: entry.totalBytes,
 		messageCount: entry.messageCount,
 		folderPaths: entry.folderPaths,
@@ -160,7 +144,7 @@ async function completePaidCheckout(
 	removeCheckoutSession(sessionId);
 	return {
 		paid: true,
-		tierId: entry.tierId,
+		billableGb: entry.billableGb,
 		sessionId,
 		launchTicket,
 	};

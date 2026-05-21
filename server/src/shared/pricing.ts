@@ -1,32 +1,79 @@
-import type { PaidMigrationTierId } from "./stripe-checkout";
+import type { MigrationPricingCatalog } from "./migration-pricing-catalog";
 
-export const PRICING_TIER_LIMITS_GB = {
-	free: 2,
-	starter: 10,
-	plus: 25,
-	pro: 25,
-} as const;
-
-export const FREE_MIGRATION_LIMIT_BYTES = PRICING_TIER_LIMITS_GB.free * 1024 ** 3;
-
-export function getPricingTier(totalBytes: number): { id: string } {
-	const gb = totalBytes / 1024 ** 3;
-	const { free, starter, plus } = PRICING_TIER_LIMITS_GB;
-
-	if (gb <= free) return { id: "free" };
-	if (gb <= starter) return { id: "starter" };
-	if (gb <= plus) return { id: "plus" };
-	return { id: "pro" };
+export function formatMoney(cents: number, currency: string): string {
+	const value = cents / 100;
+	const code = currency.toLowerCase();
+	const hasFraction = cents % 100 !== 0;
+	const digits = hasFraction ? 2 : 0;
+	if (code === "eur") {
+		const num = value.toLocaleString("de-DE", {
+			minimumFractionDigits: digits,
+			maximumFractionDigits: digits,
+		});
+		return `€${num}`;
+	}
+	if (code === "usd") {
+		return new Intl.NumberFormat("en-US", {
+			style: "currency",
+			currency: "USD",
+			minimumFractionDigits: digits,
+			maximumFractionDigits: 2,
+		}).format(value);
+	}
+	return new Intl.NumberFormat("en-US", {
+		style: "currency",
+		currency: code.toUpperCase(),
+		minimumFractionDigits: digits,
+		maximumFractionDigits: 2,
+	}).format(value);
 }
 
-export function assertTierMatchesEstimate(
-	tierId: PaidMigrationTierId,
+export function formatPricePerGbLabel(cents: number, currency: string): string {
+	return `${formatMoney(cents, currency)} / GB`;
+}
+
+export function formatPriceLabel(cents: number, currency: string): string {
+	return formatMoney(cents, currency);
+}
+
+export function billableGigabytes(
 	totalBytes: number,
+	freeLimitBytes: number,
+): number {
+	const over = Math.max(0, totalBytes - freeLimitBytes);
+	if (over === 0) return 0;
+	return Math.ceil(over / 1024 ** 3);
+}
+
+export function assertBillableGbMatchesEstimate(
+	billableGb: number,
+	totalBytes: number,
+	freeLimitBytes: number,
 ): void {
-	const expected = getPricingTier(totalBytes);
-	if (expected.id !== tierId) {
+	const expected = billableGigabytes(totalBytes, freeLimitBytes);
+	if (billableGb !== expected) {
 		throw new Error(
-			`Pricing tier mismatch (expected ${expected.id}, got ${tierId}).`,
+			`Billable GB mismatch (expected ${expected}, got ${billableGb}).`,
 		);
 	}
+}
+
+export function getMigrationPricingQuote(
+	totalBytes: number,
+	catalog: MigrationPricingCatalog,
+): { id: "free" | "paid"; billableGb: number } {
+	if (!catalog.configured) {
+		throw new Error("Stripe pricing is not configured.");
+	}
+	const billableGb = billableGigabytes(totalBytes, catalog.freeLimitBytes);
+	if (billableGb === 0) return { id: "free", billableGb: 0 };
+	return { id: "paid", billableGb };
+}
+
+/** @deprecated */
+export function getPricingTier(
+	totalBytes: number,
+	catalog: MigrationPricingCatalog,
+): { id: string } {
+	return getMigrationPricingQuote(totalBytes, catalog);
 }

@@ -1,3 +1,5 @@
+import { mkdirSync } from "node:fs";
+
 export function getPort(): number {
 	const raw = process.env.PORT?.trim();
 	const port = raw ? Number(raw) : 8787;
@@ -45,4 +47,11 @@ export function getApiKey(): string | undefined {
 
 export function isStripeConfigured(): boolean {
 	return Boolean(getStripeSecretKey());
+}
+
+export function getDataDirectory(): string {
+	const raw = process.env.ZEPRA_DATA_DIR?.trim();
+	const dir = raw && raw.length > 0 ? raw : `${process.cwd()}/data`;
+	mkdirSync(dir, { recursive: true });
+	return dir;
 }

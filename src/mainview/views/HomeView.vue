@@ -6,6 +6,7 @@ import WelcomeStep from "../components/onboarding/WelcomeStep.vue";
 import ZebraMascot from "../components/zebra/ZebraMascot.vue";
 import ZebraProgressBar from "../components/zebra/ZebraProgressBar.vue";
 import SetupConnectStep from "../components/setup/SetupConnectStep.vue";
+import type { ConnectTarget } from "../components/setup/DestinationModePicker.vue";
 import SetupFoldersStep from "../components/setup/SetupFoldersStep.vue";
 import MigrationPricingStep from "../components/migration/MigrationPricingStep.vue";
 import MigrationMailParticles from "../components/migration/MigrationMailParticles.vue";
@@ -13,13 +14,20 @@ import AppButton from "../components/ui/AppButton.vue";
 import type { MigrationSizeEstimate } from "../../shared/types";
 import { resolveBackupAccountDir } from "../../shared/backup-path";
 import { MIGRATION_COPY } from "../../shared/migration-copy";
-import { formatMigrationDurationHint } from "../../shared/migration-duration";
+import {
+	estimateMigrationDuration,
+	formatMigrationDurationHint,
+} from "../../shared/migration-duration";
+import {
+	buildMigrationSizeEstimate,
+	folderMappingsToSizeEstimates,
+} from "../../shared/migration-size-estimate";
 import { isDestinationQuotaBlocked } from "../../shared/destination-quota";
-import type { PaidMigrationTierId } from "../../shared/stripe-checkout";
 import { getRpc } from "../lib/electrobun";
 import { useMailboxesStore } from "../stores/mailboxes";
 import { useMigrationStore } from "../stores/migration";
 import { usePricingStore } from "../stores/pricing";
+import { paymentErrorMessage } from "../../shared/user-messages";
 
 type Step = "welcome" | "setup" | "folders" | "pricing";
 
@@ -31,6 +39,7 @@ const pricingPaymentError = ref<string | null>(null);
 const stripeConfigured = ref(false);
 const estimateError = ref<string | null>(null);
 const quotaWarning = ref<string | null>(null);
+const connectTarget = ref<ConnectTarget | null>(null);
 const localBackupEnabled = ref(false);
 const backupParentDir = ref("");
 const backupDiskError = ref<string | null>(null);
@@ -60,6 +69,30 @@ const { progress, overallPercent, ui, isLiveMigration, plannedDurationHint } =
 const bothConnected = computed(
 	() => sourceValidated.value && destValidated.value,
 );
+
+/** Backup path from step 1 — keep working on step 2 even if connectTarget was cleared. */
+const backupOnlyFlow = computed(
+	() =>
+		connectTarget.value === "backup" ||
+		(Boolean(backupParentDir.value.trim()) &&
+			connectTarget.value !== "mail" &&
+			!destValidated.value),
+);
+
+const selectedFolderCount = computed(
+	() => folderMappings.value.filter((f) => f.selected).length,
+);
+
+const backupReady = computed(
+	() => backupParentDir.value.trim().length > 0 && !backupDiskError.value,
+);
+
+const readyForFolders = computed(() => {
+	if (!sourceValidated.value) return false;
+	if (connectTarget.value === "mail") return destValidated.value;
+	if (connectTarget.value === "backup") return backupReady.value;
+	return false;
+});
 
 const usesDock = computed(
 	() =>
@@ -105,14 +138,21 @@ async function goToSetup() {
 	quotaWarning.value = null;
 	plannedDurationHint.value = null;
 	sizeEstimate.value = null;
+	connectTarget.value = null;
 	await mailboxes.resetForNewMigration();
 	step.value = "setup";
 }
 
 async function goToFolders() {
-	if (!bothConnected.value) return;
+	if (!readyForFolders.value) return;
 	step.value = "folders";
 	await mailboxes.loadFolderStats();
+}
+
+function onSourceCredentialsEdited() {
+	sourceValidated.value = false;
+	connectTarget.value = null;
+	destValidated.value = false;
 }
 
 function backFromSetup() {
@@ -126,8 +166,23 @@ function backFromFolders() {
 	step.value = "setup";
 }
 
+function selectedFolderTotals(): { totalBytes: number; messageCount: number } {
+	return folderMappings.value
+		.filter((f) => f.selected)
+		.reduce(
+			(acc, f) => ({
+				totalBytes: acc.totalBytes + (f.bytes ?? 0),
+				messageCount: acc.messageCount + (f.messages ?? 0),
+			}),
+			{ totalBytes: 0, messageCount: 0 },
+		);
+}
+
 async function refreshBackupDiskHint(requiredBytes: number) {
-	if (!localBackupEnabled.value || !backupParentDir.value.trim()) {
+	const usesBackupDir =
+		backupParentDir.value.trim() &&
+		(localBackupEnabled.value || connectTarget.value === "backup");
+	if (!usesBackupDir) {
 		backupDiskError.value = null;
 		return;
 	}
@@ -163,8 +218,9 @@ async function pickBackupDir() {
 
 async function resolveBackupRootForStart(
 	estimate: MigrationSizeEstimate,
+	required = false,
 ): Promise<string | null> {
-	if (!localBackupEnabled.value) return null;
+	if (!required && !localBackupEnabled.value) return null;
 	if (!backupParentDir.value.trim()) {
 		throw new Error("Choose a folder for your local backup.");
 	}
@@ -173,6 +229,47 @@ async function resolveBackupRootForStart(
 		throw new Error(backupDiskError.value);
 	}
 	return resolveBackupAccountDir(backupParentDir.value, source.value.email);
+}
+
+async function resolveBackupRootForBackupStart(): Promise<string> {
+	if (!backupParentDir.value.trim()) {
+		throw new Error("Choose a folder for your local backup.");
+	}
+	const { totalBytes } = selectedFolderTotals();
+	if (totalBytes > 0) {
+		await refreshBackupDiskHint(totalBytes);
+		if (backupDiskError.value) {
+			throw new Error(backupDiskError.value);
+		}
+	}
+	return resolveBackupAccountDir(backupParentDir.value, source.value.email);
+}
+
+async function buildStartEstimate(): Promise<MigrationSizeEstimate> {
+	const cachedFolders = folderMappingsToSizeEstimates(folderMappings.value);
+	if (cachedFolders != null) {
+		await pricing.ensureLoaded();
+		const catalog = pricing.activeCatalog;
+		return buildMigrationSizeEstimate({
+			folders: cachedFolders,
+			sourceProvider: source.value.provider,
+			destProvider: destination.value.provider,
+			pricing: {
+				configured: catalog?.configured === true,
+				freeLimitBytes: catalog?.freeLimitBytes ?? 0,
+			},
+		});
+	}
+
+	const selectedPaths = folderMappings.value
+		.filter((f) => f.selected)
+		.map((f) => f.sourcePath);
+
+	return getRpc().request.estimateMigrationSize({
+		source: source.value,
+		destination: destination.value,
+		folderPaths: selectedPaths,
+	});
 }
 
 async function verifyDestinationQuota(estimate: MigrationSizeEstimate) {
@@ -204,26 +301,61 @@ async function onCloudTestMailboxes() {
 }
 
 async function startMigration() {
-	if (!bothConnected.value || estimatingSize.value) return;
+	if (estimatingSize.value) return;
+	if (selectedFolderCount.value === 0) {
+		estimateError.value = "Select at least one folder.";
+		return;
+	}
 
-	estimatingSize.value = true;
 	estimateError.value = null;
 	quotaWarning.value = null;
-	try {
-		const rpc = getRpc();
-		const selectedPaths = folderMappings.value
-			.filter((f) => f.selected)
-			.map((f) => f.sourcePath);
-		const estimate = await rpc.request.estimateMigrationSize({
-			source: source.value,
-			destination: destination.value,
-			folderPaths: selectedPaths,
-		});
 
+	if (backupOnlyFlow.value) {
+		if (!backupParentDir.value.trim()) {
+			estimateError.value = "Choose a folder for your local backup in step 1.";
+			return;
+		}
+		try {
+			const { totalBytes, messageCount } = selectedFolderTotals();
+			const duration = estimateMigrationDuration({
+				totalBytes,
+				messageCount,
+				sourceProvider: source.value.provider,
+				destProvider: "generic",
+			});
+			plannedDurationHint.value = formatMigrationDurationHint(duration);
+			const backupRootPath = await resolveBackupRootForBackupStart();
+			await migration.start(undefined, {
+				plannedSecondsTypical: duration.secondsTypical,
+				backupRootPath,
+				jobType: "backup",
+			});
+		} catch (error) {
+			estimateError.value =
+				error instanceof Error ? error.message : "Could not start backup";
+		}
+		return;
+	}
+
+	if (!readyForFolders.value) return;
+
+	estimatingSize.value = true;
+	try {
+		const estimate = await buildStartEstimate();
 		await verifyDestinationQuota(estimate);
 		plannedDurationHint.value = formatMigrationDurationHint(estimate);
 
 		if (estimate.requiresPayment) {
+			await pricing.refreshEntitlement(true);
+			if (pricing.hasLifetime) {
+				const backupRootPath = await resolveBackupRootForStart(estimate);
+				await migration.start(undefined, {
+					plannedSecondsTypical: estimate.secondsTypical,
+					backupRootPath,
+				});
+				step.value = "setup";
+				return;
+			}
 			sizeEstimate.value = estimate;
 			step.value = "pricing";
 			return;
@@ -305,23 +437,46 @@ watch(step, async (current) => {
 	stripeConfigured.value = pricing.stripeLive;
 });
 
+async function confirmLifetimeAndMigrate() {
+	if (!sizeEstimate.value) return;
+	pricingContinueLoading.value = true;
+	pricingPaymentError.value = null;
+	plannedDurationHint.value = formatMigrationDurationHint(sizeEstimate.value);
+	try {
+		await pricing.purchaseLifetime();
+		const backupRootPath = await resolveBackupRootForStart(sizeEstimate.value);
+		await migration.start(undefined, {
+			plannedSecondsTypical: sizeEstimate.value.secondsTypical,
+			backupRootPath,
+		});
+		sizeEstimate.value = null;
+		step.value = "setup";
+	} catch (error) {
+		pricingPaymentError.value = paymentErrorMessage(error);
+	} finally {
+		pricingContinueLoading.value = false;
+	}
+}
+
 async function confirmPricingAndMigrate() {
 	if (!sizeEstimate.value) return;
 	pricingContinueLoading.value = true;
 	pricingPaymentError.value = null;
 	plannedDurationHint.value = formatMigrationDurationHint(sizeEstimate.value);
 	try {
-		const tier = pricing.tierForBytes(sizeEstimate.value.totalBytes);
-		if (tier.id === "free") {
-			throw new Error("This migration is within the free limit.");
+		if (!pricing.isReady) {
+			throw new Error("pricing_unavailable");
+		}
+		const quote = pricing.quoteForBytes(sizeEstimate.value.totalBytes);
+		if (quote.id === "free") {
+			throw new Error("within_free_limit");
 		}
 
-		const tierId = tier.id as PaidMigrationTierId;
 		const folderPaths = folderMappings.value
 			.filter((f) => f.selected)
 			.map((f) => f.sourcePath);
 		const checkout = await getRpc().request.createMigrationCheckout({
-			tierId,
+			billableGb: quote.billableGb,
 			totalBytes: sizeEstimate.value.totalBytes,
 			messageCount: sizeEstimate.value.messageCount,
 			folderCount: folderPaths.length,
@@ -329,9 +484,7 @@ async function confirmPricingAndMigrate() {
 		});
 
 		if (!checkout.configured) {
-			throw new Error(
-				"Stripe is not set up yet. Add STRIPE_SECRET_KEY to mailport/.env and restart Zepra.",
-			);
+			throw new Error("checkout_unavailable");
 		}
 
 		const opened = await getRpc().request.openMigrationCheckout({
@@ -339,14 +492,14 @@ async function confirmPricingAndMigrate() {
 			sessionId: checkout.sessionId,
 		});
 		if (!opened.opened) {
-			throw new Error("Could not open your browser for Stripe checkout.");
+			throw new Error("browser_open_failed");
 		}
 
 		const payment = await getRpc().request.waitForMigrationCheckout({
 			sessionId: checkout.sessionId,
 		});
 		if (!payment.paid) {
-			throw new Error(payment.error);
+			throw new Error(payment.error ?? "payment_failed");
 		}
 
 		const backupRootPath = await resolveBackupRootForStart(sizeEstimate.value);
@@ -359,8 +512,7 @@ async function confirmPricingAndMigrate() {
 		step.value = "setup";
 		sizeEstimate.value = null;
 	} catch (error) {
-		pricingPaymentError.value =
-			error instanceof Error ? error.message : "Payment could not be completed";
+		pricingPaymentError.value = paymentErrorMessage(error);
 	} finally {
 		pricingContinueLoading.value = false;
 	}
@@ -374,6 +526,7 @@ function onDone() {
 
 onMounted(async () => {
 	void pricing.ensureLoaded();
+	void pricing.refreshEntitlement();
 	const settings = await getRpc().request.getSettings({});
 	if (settings.lastBackupParentDir) {
 		backupParentDir.value = settings.lastBackupParentDir;
@@ -446,6 +599,7 @@ async function startAnotherMigration() {
 					:payment-error="pricingPaymentError"
 					@back="backFromPricing"
 					@continue="confirmPricingAndMigrate"
+					@lifetime="confirmLifetimeAndMigrate"
 				/>
 
 				<div v-else key="s" class="setup step-view">
@@ -517,6 +671,7 @@ async function startAnotherMigration() {
 						v-model:folder-mappings="folderMappings"
 						v-model:local-backup-enabled="localBackupEnabled"
 						v-model:backup-parent-dir="backupParentDir"
+						:backup-only="backupOnlyFlow"
 						:source-provider="source.provider"
 						:dest-provider="destination.provider"
 						:loading-stats="loadingFolderStats"
@@ -536,21 +691,27 @@ async function startAnotherMigration() {
 						v-else-if="step === 'setup'"
 						v-model:source="source"
 						v-model:destination="destination"
+						v-model:connect-target="connectTarget"
+						v-model:backup-parent-dir="backupParentDir"
 						:subline="subline"
 						:source-validated="sourceValidated"
 						:dest-validated="destValidated"
+						:backup-ready="backupReady"
 						:testing-source="testingSource"
 						:testing-dest="testingDest"
 						:source-test-error="sourceTestError"
 						:dest-test-error="destTestError"
+						:backup-disk-error="backupDiskError"
+						:picking-backup-dir="pickingBackupDir"
 						@back="backFromSetup"
 						@verify-source="verifySource"
 						@verify-dest="verifyDest"
-						@credentials-edited-source="sourceValidated = false"
+						@credentials-edited-source="onSourceCredentialsEdited"
 						@credentials-edited-dest="destValidated = false"
 						@apply-source="mailboxes.applyLocalTestSource()"
 						@apply-dest="mailboxes.applyLocalTestDest()"
 						@apply-cloud="onCloudTestMailboxes"
+						@pick-backup-dir="pickBackupDir"
 						@continue="goToFolders"
 					/>
 				</div>

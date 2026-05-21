@@ -1,18 +1,12 @@
 import type Stripe from "stripe";
 import { paymentReturnBase } from "../config";
 import { hashFolderSelection } from "../shared/migration-payment";
-import { assertTierMatchesEstimate } from "../shared/pricing";
-import type {
-	MigrationCheckoutCreateBody,
-	PaidMigrationTierId,
-} from "../shared/stripe-checkout";
+import { assertBillableGbMatchesEstimate } from "../shared/pricing";
+import type { MigrationCheckoutCreateBody } from "../shared/stripe-checkout";
 import { MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES } from "../shared/stripe-checkout";
-import {
-	createStripeClient,
-	isStripeConfigured,
-	resolvePriceId,
-} from "../stripe-client";
+import { createStripeClient, isStripeConfigured } from "../stripe-client";
 import { issueMigrationLaunchTicket } from "./launch-ticket";
+import { getMigrationPricingCatalog } from "./pricing-catalog";
 import {
 	getLaunchTicket,
 	isSessionConsumed,
@@ -32,7 +26,7 @@ export type CheckoutStatusResponse =
 	| {
 			status: "paid";
 			sessionId: string;
-			tierId: PaidMigrationTierId;
+			billableGb: number;
 			launchTicket: string;
 	  }
 	| {
@@ -41,31 +35,26 @@ export type CheckoutStatusResponse =
 			error: string;
 	  };
 
-function readPaidTierMetadata(session: Stripe.Checkout.Session): {
-	tierId: PaidMigrationTierId;
+function readPaidMetadata(session: Stripe.Checkout.Session): {
+	billableGb: number;
 	totalBytes: number;
 	messageCount: number;
 	folderPathsHash: string;
 } | null {
-	const tierId = session.metadata?.tier_id as PaidMigrationTierId | undefined;
-	if (
-		tierId !== "starter" &&
-		tierId !== "plus" &&
-		tierId !== "pro"
-	) {
-		return null;
-	}
+	const billableGb = Number(session.metadata?.billable_gb ?? NaN);
 	const totalBytes = Number(session.metadata?.total_bytes ?? NaN);
 	const messageCount = Number(session.metadata?.message_count ?? NaN);
 	const folderPathsHash = session.metadata?.folder_paths_hash ?? "";
 	if (
+		!Number.isFinite(billableGb) ||
+		billableGb < 1 ||
 		!Number.isFinite(totalBytes) ||
 		!Number.isFinite(messageCount) ||
 		!folderPathsHash
 	) {
 		return null;
 	}
-	return { tierId, totalBytes, messageCount, folderPathsHash };
+	return { billableGb, totalBytes, messageCount, folderPathsHash };
 }
 
 export async function createCheckoutSession(
@@ -75,25 +64,36 @@ export async function createCheckoutSession(
 		throw new Error("Stripe is not configured on the server.");
 	}
 
-	assertTierMatchesEstimate(body.tierId, body.totalBytes);
+	const catalog = await getMigrationPricingCatalog();
+	if (!catalog.configured || !catalog.priceId) {
+		throw new Error("Stripe migration pricing is not configured.");
+	}
+
+	assertBillableGbMatchesEstimate(
+		body.billableGb,
+		body.totalBytes,
+		catalog.freeLimitBytes,
+	);
 
 	const stripe = createStripeClient();
-	const priceId = await resolvePriceId(stripe, body.tierId);
 	const folderPathsHash = hashFolderSelection(body.folderPaths);
 	const base = paymentReturnBase();
 
 	const session = await stripe.checkout.sessions.create({
 		mode: "payment",
 		payment_method_types: [...MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES],
-		line_items: [{ price: priceId, quantity: 1 }],
+		line_items: [{ price: catalog.priceId, quantity: body.billableGb }],
 		success_url: `${base}/success?session_id={CHECKOUT_SESSION_ID}`,
 		cancel_url: `${base}/cancel?session_id={CHECKOUT_SESSION_ID}`,
 		metadata: {
-			tier_id: body.tierId,
+			pricing_model: "per_gb",
+			billable_gb: String(body.billableGb),
 			total_bytes: String(body.totalBytes),
 			message_count: String(body.messageCount),
 			folder_count: String(body.folderCount),
 			folder_paths_hash: folderPathsHash,
+			free_migration_gb: String(catalog.freeLimitGb),
+			stripe_price_id: catalog.priceId,
 		},
 	});
 
@@ -115,12 +115,12 @@ async function issueTicketFromStripeSession(
 	const existing = getLaunchTicket(session.id);
 	if (existing) return existing;
 
-	const meta = readPaidTierMetadata(session);
+	const meta = readPaidMetadata(session);
 	if (!meta) return null;
 
 	const launchTicket = issueMigrationLaunchTicket({
 		stripeSessionId: session.id,
-		tierId: meta.tierId,
+		billableGb: meta.billableGb,
 		totalBytes: meta.totalBytes,
 		messageCount: meta.messageCount,
 		folderPathsHash: meta.folderPathsHash,
@@ -159,7 +159,7 @@ export async function getCheckoutStatus(
 	if (cached) {
 		const stripe = createStripeClient();
 		const session = await stripe.checkout.sessions.retrieve(sessionId);
-		const meta = readPaidTierMetadata(session);
+		const meta = readPaidMetadata(session);
 		if (!meta) {
 			return {
 				status: "pending",
@@ -169,7 +169,7 @@ export async function getCheckoutStatus(
 		return {
 			status: "paid",
 			sessionId,
-			tierId: meta.tierId,
+			billableGb: meta.billableGb,
 			launchTicket: cached,
 		};
 	}
@@ -191,7 +191,7 @@ export async function getCheckoutStatus(
 
 	if (session.payment_status === "paid") {
 		const launchTicket = await issueTicketFromStripeSession(session);
-		const meta = readPaidTierMetadata(session);
+		const meta = readPaidMetadata(session);
 		if (!launchTicket || !meta) {
 			return {
 				status: "pending",
@@ -201,7 +201,7 @@ export async function getCheckoutStatus(
 		return {
 			status: "paid",
 			sessionId,
-			tierId: meta.tierId,
+			billableGb: meta.billableGb,
 			launchTicket,
 		};
 	}

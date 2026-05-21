@@ -1,13 +1,17 @@
 /** User-facing copy for the free local backup feature. */
 export const BACKUP_COPY = {
-	freeBadge: "Free",
-	panelTitle: "Free local backup on your Mac",
+	panelTitle: "Also save a local copy while migrating",
 	panelHint:
-		"Save every message as .eml (with attachments) while Zepra migrates — yours to keep, import in Apple Mail or Thunderbird anytime.",
+		"Optional .eml backup on your Mac during the move — import in Apple Mail or Thunderbird anytime.",
+	connectTargetLabel: "Backup locally",
+	connectTargetHint: "Save .eml files on your Mac — no second mailbox",
+	targetCardTitle: "Backup on your Mac",
+	targetCardSub: "Every message is saved as .eml with attachments. Nothing is uploaded.",
+	targetPathPlaceholder: "Choose where to save your backup…",
 	chooseFolder: "Choose folder…",
 	openingFolder: "Opening…",
 	welcomePerkTitle: "Free Mac backup",
-	welcomePerkText: ".eml copy on your Mac.",
+	welcomePerkText: "Back up a mailbox without migrating.",
 	pricingLead:
-		"Every migration can include a free local backup on your Mac — your safety net before and after the move.",
+		"Migrate or back up on your Mac for free.",
 } as const;

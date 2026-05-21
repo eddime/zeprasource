@@ -16,7 +16,7 @@ describe("migration launch ticket", () => {
 		process.env.STRIPE_SECRET_KEY = "sk_test_launch_ticket_secret";
 		const ticket = issueMigrationLaunchTicket({
 			stripeSessionId: "cs_test_123",
-			tierId: "plus",
+			billableGb: 8,
 			totalBytes: 12_000_000_000,
 			messageCount: 42_000,
 			folderPathsHash: "abc123",
@@ -27,7 +27,7 @@ describe("migration launch ticket", () => {
 
 		const payload = parseMigrationLaunchTicket(ticket);
 		expect(payload.sid).toBe("cs_test_123");
-		expect(payload.tier).toBe("plus");
+		expect(payload.gb).toBe(8);
 		expect(payload.bytes).toBe(12_000_000_000);
 	});
 
@@ -35,7 +35,7 @@ describe("migration launch ticket", () => {
 		process.env.STRIPE_SECRET_KEY = "sk_test_launch_ticket_secret";
 		const ticket = issueMigrationLaunchTicket({
 			stripeSessionId: "cs_test_123",
-			tierId: "starter",
+			billableGb: 1,
 			totalBytes: 3_000_000_000,
 			messageCount: 1000,
 			folderPathsHash: "hash",

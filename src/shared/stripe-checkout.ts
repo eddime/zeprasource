@@ -1,11 +1,10 @@
-/** Stripe Price lookup keys (Wellemachen / Zepra live catalog). */
-export const STRIPE_MIGRATION_LOOKUP_KEYS = {
-	starter: "zepra_migration_trot",
-	plus: "zepra_migration_gallop",
-	pro: "zepra_migration_stampede",
-} as const;
+/** Stripe Price lookup key — one unit = 1 GB (Wellemachen / Zepra catalog). */
+export const STRIPE_MIGRATION_PER_GB_LOOKUP_KEY = "zepra_migration_per_gb";
 
-export type PaidMigrationTierId = keyof typeof STRIPE_MIGRATION_LOOKUP_KEYS;
+/** One-time Zepra Lifetime — unlimited migration runs (license from Zepra Server). */
+export const STRIPE_ZEPRA_LIFETIME_LOOKUP_KEY = "zepra_lifetime";
+
+export const LIFETIME_LICENSE_PREFIX = "zepra_lt";
 
 /**
  * Migration checkout only — instant one-time payment (no SEPA direct debit).
@@ -14,7 +13,8 @@ export type PaidMigrationTierId = keyof typeof STRIPE_MIGRATION_LOOKUP_KEYS;
 export const MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES = ["card"] as const;
 
 export type MigrationCheckoutCreateParams = {
-	tierId: PaidMigrationTierId;
+	/** Billed gigabytes (ceil of bytes over free limit). */
+	billableGb: number;
 	totalBytes: number;
 	messageCount: number;
 	folderCount: number;
@@ -36,7 +36,7 @@ export type MigrationCheckoutCreateResult =
 export type MigrationCheckoutWaitResult =
 	| {
 			paid: true;
-			tierId: PaidMigrationTierId;
+			billableGb: number;
 			sessionId: string;
 			/** HMAC-signed license — required to start migration (single use, not forgeable in SQLite). */
 			launchTicket: string;

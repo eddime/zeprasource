@@ -114,7 +114,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 	const database = getDatabase();
 	const row = database
 		.query(
-			`SELECT id, source_email, dest_email, status, folders_total, folders_completed,
+			`SELECT id, source_email, dest_email, job_type, status, folders_total, folders_completed,
         messages_total, messages_completed, messages_failed, bytes_transferred,
         created_at, started_at, completed_at, error, user_paused
        FROM migrations WHERE id = ?`,
@@ -123,6 +123,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 		id: string;
 		source_email: string;
 		dest_email: string;
+		job_type: string;
 		status: MigrationStatus;
 		folders_total: number;
 		folders_completed: number;
@@ -143,6 +144,7 @@ export function getMigrationById(id: string): MigrationRecord | null {
 		id: row.id,
 		sourceEmail: decryptString(row.source_email) ?? row.source_email,
 		destEmail: decryptString(row.dest_email) ?? row.dest_email,
+		jobType: row.job_type === "backup" ? "backup" : "migrate",
 		status: row.status,
 		foldersTotal: row.folders_total,
 		foldersCompleted: row.folders_completed,

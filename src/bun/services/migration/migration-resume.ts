@@ -1,4 +1,5 @@
-import type { FolderMapping, MailboxCredentials } from "../../../shared/types";
+import type { FolderMapping, MailboxCredentials, MigrationJobType } from "../../../shared/types";
+import { LOCAL_BACKUP_DEST_EMAIL } from "../../../shared/migration-job";
 import { getDatabase } from "../../db/database";
 import {
 	setUserPausedFlag,
@@ -103,12 +104,24 @@ function loadFolderMappingsFromDb(migrationId: string): FolderMapping[] {
 
 export type MigrationResumePayload = {
 	migrationId: string;
+	jobType: MigrationJobType;
 	source: MailboxCredentials;
 	destination: MailboxCredentials;
 	folderMappings: FolderMapping[];
-	/** Parent dir + account subfolder; null when backup disabled. */
+	/** Resolved account backup dir; required when jobType is backup. */
 	backupRootPath: string | null;
 };
+
+export function localBackupPlaceholderDestination(): MailboxCredentials {
+	return {
+		provider: "generic",
+		email: LOCAL_BACKUP_DEST_EMAIL,
+		host: "local",
+		port: 0,
+		secure: false,
+		authMethod: "password",
+	};
+}
 
 export function loadMigrationResumePayload(
 	migrationId: string,
@@ -116,11 +129,12 @@ export function loadMigrationResumePayload(
 	const db = getDatabase();
 	const row = db
 		.query(
-			`SELECT id, status, source_email, dest_email, backup_root_path FROM migrations WHERE id = ?`,
+			`SELECT id, status, job_type, source_email, dest_email, backup_root_path FROM migrations WHERE id = ?`,
 		)
 		.get(migrationId) as {
 		id: string;
 		status: string;
+		job_type: string;
 		source_email: string;
 		dest_email: string;
 		backup_root_path: string | null;
@@ -135,10 +149,22 @@ export function loadMigrationResumePayload(
 	if (!source) source = loadMailboxCredentialsByRole("source");
 	if (!destination) destination = loadMailboxCredentialsByRole("destination");
 
-	if (!source || !destination) {
+	const jobType: MigrationJobType = row.job_type === "backup" ? "backup" : "migrate";
+
+	if (!source) {
 		logger.error(
 			"migration",
 			`Resume payload missing credentials for ${migrationId}`,
+		);
+		return null;
+	}
+
+	if (jobType === "backup") {
+		destination = localBackupPlaceholderDestination();
+	} else if (!destination) {
+		logger.error(
+			"migration",
+			`Resume payload missing destination for ${migrationId}`,
 		);
 		return null;
 	}
@@ -155,7 +181,12 @@ export function loadMigrationResumePayload(
 			decryptString(row.backup_root_path) ?? row.backup_root_path;
 	}
 
-	return { migrationId, source, destination, folderMappings, backupRootPath };
+	if (jobType === "backup" && !backupRootPath) {
+		logger.error("migration", `Backup job ${migrationId} has no backup_root_path`);
+		return null;
+	}
+
+	return { migrationId, jobType, source, destination, folderMappings, backupRootPath };
 }
 
 /** Crash-safe: in-flight "running" rows become pausable checkpoints. */

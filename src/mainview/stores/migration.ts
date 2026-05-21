@@ -91,6 +91,23 @@ export const useMigrationStore = defineStore("migration", () => {
 		}
 	}
 
+	function seedOptimisticRunningProgress(
+		migrationId: string,
+		foldersTotal: number,
+	): void {
+		applyProgress({
+			migrationId,
+			status: "running",
+			foldersTotal,
+			foldersCompleted: 0,
+			messagesTotal: 0,
+			messagesCompleted: 0,
+			messagesFailed: 0,
+			bytesTransferred: 0,
+			updatedAt: new Date().toISOString(),
+		});
+	}
+
 	async function refreshEngineActive() {
 		try {
 			engineActiveIds.value = await getRpc().request.getActiveMigrationIds({});
@@ -193,16 +210,24 @@ export const useMigrationStore = defineStore("migration", () => {
 			plannedSecondsTypical?: number;
 			launchTicket?: string;
 			backupRootPath?: string | null;
+			jobType?: "migrate" | "backup";
 		},
 	) {
 		const rpc = getRpc();
+		const isFreshStart =
+			options?.jobType === "backup" ||
+			options?.jobType === "migrate" ||
+			Boolean(options?.backupRootPath) ||
+			Boolean(options?.launchTicket);
 		const resumeId =
 			explicitResumeId ??
-			(focusedProgress.value?.status === "running" ||
-			focusedProgress.value?.status === "paused" ||
-			focusedProgress.value?.status === "failed"
-				? (focusedId.value ?? undefined)
-				: undefined);
+			(isFreshStart
+				? undefined
+				: focusedProgress.value?.status === "running" ||
+						focusedProgress.value?.status === "paused" ||
+						focusedProgress.value?.status === "failed"
+					? (focusedId.value ?? undefined)
+					: undefined);
 
 		pendingAction.value = resumeId ? "resume" : "start";
 		resumeError.value = null;
@@ -213,16 +238,29 @@ export const useMigrationStore = defineStore("migration", () => {
 				? await rpc.request.startMigration({ resumeMigrationId: resumeId })
 				: await rpc.request.startMigration({
 						source: mailboxes.source,
-						destination: mailboxes.destination,
+						destination:
+							options?.jobType === "backup" ? undefined : mailboxes.destination,
 						folderMappings: mailboxes.folderMappings.filter((f) => f.selected),
 						plannedSecondsTypical: options?.plannedSecondsTypical,
 						launchTicket: options?.launchTicket,
 						backupRootPath: options?.backupRootPath ?? null,
+						jobType: options?.jobType ?? "migrate",
 					});
 
 			focusedId.value = migrationId;
+
+			if (!resumeId) {
+				const foldersTotal = mailboxes.folderMappings.filter((f) => f.selected).length;
+				seedOptimisticRunningProgress(migrationId, foldersTotal);
+			}
+
 			await refreshEngineActive();
-			await syncFocusedSnapshot();
+			try {
+				const snapshot = await rpc.request.getMigrationProgress({ migrationId });
+				if (snapshot) applyProgress(snapshot);
+			} catch {
+				await syncFocusedSnapshot();
+			}
 		} catch (error) {
 			pendingAction.value = null;
 			throw error;

@@ -18,6 +18,12 @@ import type {
 	MigrationCheckoutWaitResult,
 } from "../../shared/stripe-checkout";
 import type { MigrationPricingCatalog } from "../../shared/migration-pricing-catalog";
+import type { ZepraPricingCatalog } from "../../shared/lifetime-pricing-catalog";
+import type {
+	LifetimeCheckoutCreateResult,
+	LifetimeCheckoutWaitResult,
+	EntitlementStatus,
+} from "../../shared/lifetime-checkout";
 
 export type MailPortRPC = {
 	bun: RPCSchema<{
@@ -104,6 +110,7 @@ export type MailPortRPC = {
 					destination?: MailboxCredentials;
 					folderMappings?: FolderMapping[];
 					backupRootPath?: string | null;
+					jobType?: "migrate" | "backup";
 					resumeMigrationId?: string;
 					plannedSecondsTypical?: number;
 					launchTicket?: string;
@@ -188,6 +195,22 @@ export type MailPortRPC = {
 			getMigrationPricingCatalog: {
 				params: Record<string, never>;
 				response: MigrationPricingCatalog;
+			};
+			getZepraPricingCatalog: {
+				params: Record<string, never>;
+				response: ZepraPricingCatalog;
+			};
+			getEntitlementStatus: {
+				params: Record<string, never>;
+				response: EntitlementStatus;
+			};
+			createLifetimeCheckout: {
+				params: Record<string, never>;
+				response: LifetimeCheckoutCreateResult;
+			};
+			waitForLifetimeCheckout: {
+				params: { sessionId: string };
+				response: LifetimeCheckoutWaitResult;
 			};
 		};
 		messages: {};

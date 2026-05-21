@@ -1,15 +1,47 @@
 <script setup lang="ts">
-import { watch } from "vue";
+import { computed, ref, watch } from "vue";
 import stripeWordmark from "@/assets/stripe-wordmark.svg";
 import { BACKUP_COPY } from "../../../shared/backup-copy";
-import { PRICING_TIER_LIMITS_GB } from "../../../shared/pricing";
+import { paymentErrorMessage } from "../../../shared/user-messages";
+import { formatMoney } from "../../../shared/pricing";
 import { usePricingStore } from "../../stores/pricing";
 
 const open = defineModel<boolean>("open", { default: false });
 const pricing = usePricingStore();
+const lifetimeError = ref<string | null>(null);
 
 watch(open, (isOpen) => {
-	if (isOpen) void pricing.ensureLoaded();
+	if (!isOpen) return;
+	lifetimeError.value = null;
+	void pricing.ensureLoaded(true);
+	void pricing.refreshEntitlement(true);
+});
+
+async function buyLifetime() {
+	lifetimeError.value = null;
+	try {
+		await pricing.purchaseLifetime();
+	} catch (err) {
+		lifetimeError.value = paymentErrorMessage(err);
+	}
+}
+
+const lifetimePrice = computed(() => pricing.lifetimeCatalog.priceLabel);
+
+const showPricingHero = computed(
+	() => pricing.isReady || pricing.lifetimeReady || pricing.hasLifetime,
+);
+
+const showLifetimeBelow = computed(
+	() => pricing.hasLifetime || pricing.lifetimeReady,
+);
+
+const freeLimitGb = computed(() => pricing.activeCatalog?.freeLimitGb);
+
+const unitPrice = computed(() => {
+	const c = pricing.activeCatalog;
+	if (!c) return "—";
+	return formatMoney(c.pricePerGbCents, c.currency);
 });
 
 function close() {
@@ -21,7 +53,6 @@ function close() {
 	<svg class="sheet-clip-svg" aria-hidden="true" focusable="false">
 		<defs>
 			<clipPath id="pricing-zebra-clip" clipPathUnits="objectBoundingBox">
-				<!-- Three soft waves in left strip; straight edge at 22% for content padding -->
 				<path
 					d="
 						M 0.22,0
@@ -43,7 +74,7 @@ function close() {
 				v-if="open"
 				type="button"
 				class="sheet-scrim"
-				aria-label="Close pricing"
+				aria-label="Close fair pricing"
 				@click="close"
 			/>
 		</Transition>
@@ -88,46 +119,111 @@ function close() {
 				<button type="button" class="x" aria-label="Close" @click="close">×</button>
 
 				<div class="sheet-inner">
-					<header class="sheet-head">
-						<h2 id="pricing-title">Pricing</h2>
-						<p class="lead">
-							Let's be fair: who wants a subscription just to move email?
-						</p>
-						<p class="lead lead-2">
-							<strong>{{ PRICING_TIER_LIMITS_GB.free }} GB free</strong> per migration, enough
-							for most. Bigger mailbox? Fair <strong>one-time payment</strong>. No stress, as it
-							should be.
-						</p>
-						<p class="lead lead-backup">{{ BACKUP_COPY.pricingLead }}</p>
-					</header>
+					<div class="sheet-body">
+					<div class="sheet-main">
+						<header class="sheet-head">
+							<h2 id="pricing-title">Fair pricing</h2>
+							<p class="sheet-prose">
+								Let's be fair: who wants a subscription just to move email?
+								<strong v-if="pricing.isReady">{{ freeLimitGb }} GB free</strong>
+								<strong v-else>A free tier</strong>
+								per migration, enough for most.
+								Need more?
+								<strong v-if="pricing.isReady">{{ pricing.activeCatalog!.pricePerGbLabel }}</strong>
+								<strong v-else>fair per-gigabyte pricing</strong>, pay once.
+								<template v-if="showLifetimeBelow && !pricing.hasLifetime">
+									Or own Zepra for
+									<strong>{{ lifetimePrice }}</strong>
+									forever & unlimited.
+								</template>
+								<template v-else-if="pricing.hasLifetime">
+									Your Lifetime license covers every run.
+								</template>
+								Clear pricing, no hidden costs. {{ BACKUP_COPY.pricingLead }}
+							</p>
+						</header>
 
-					<p v-if="pricing.loading" class="plans-loading">Loading prices from Stripe…</p>
-
-					<ul class="plans" :class="{ 'is-loading': pricing.loading }">
-						<li
-							v-for="plan in pricing.plans"
-							:key="plan.id"
-							class="plan"
-							:class="[
-								`plan--${plan.id}`,
-								{ 'plan--featured': plan.id === 'starter' },
-							]"
+						<section
+							v-if="showPricingHero"
+							class="pricing-hero"
+							aria-label="How pricing works"
 						>
-							<span class="plan-badge">{{ plan.sizeLabel }}</span>
-							<div class="plan-body">
-								<div class="plan-copy">
-									<h3>{{ plan.name }}</h3>
-									<p v-if="plan.tagline" class="tagline">{{ plan.tagline }}</p>
-								</div>
-								<p
-									class="price"
-									:class="{ 'price--free': plan.id === 'free' }"
-								>
-									{{ plan.id === 'free' ? 'Free' : plan.priceLabel }}
-								</p>
+							<div v-if="pricing.isReady" class="hero-rules">
+								<article class="rule rule--free">
+									<p class="rule-kicker">Per migration</p>
+									<p class="rule-value">
+										<span class="rule-num">{{ freeLimitGb }}</span>
+										<span class="rule-unit">GB</span>
+									</p>
+									<p class="rule-label">free</p>
+								</article>
+
+								<div class="rule-divider" aria-hidden="true" />
+
+								<article class="rule rule--paid">
+									<p class="rule-kicker">Above {{ freeLimitGb }} GB</p>
+									<p class="rule-value">
+										<span class="rule-num">{{ unitPrice }}</span>
+									</p>
+									<p class="rule-label">/ GB · per migration</p>
+								</article>
 							</div>
-						</li>
-					</ul>
+
+							<p
+								v-if="pricing.isReady && showLifetimeBelow"
+								class="pricing-or"
+								aria-hidden="true"
+							>
+								or
+							</p>
+
+							<div
+								v-if="showLifetimeBelow"
+								class="lifetime-below"
+								:class="{ 'lifetime-below--active': pricing.hasLifetime }"
+								:role="pricing.hasLifetime ? 'status' : undefined"
+								aria-label="Zepra Lifetime"
+							>
+								<div class="lifetime-below-main">
+									<p class="lifetime-below-kicker">Own Zepra forever</p>
+									<template v-if="pricing.hasLifetime">
+										<p class="lifetime-below-title">
+											<span class="lifetime-below-check" aria-hidden="true">✓</span>
+											Lifetime active
+										</p>
+										<p class="lifetime-below-meta">Unlimited migrations</p>
+									</template>
+									<template v-else>
+										<p class="lifetime-below-price">{{ lifetimePrice }}</p>
+										<p class="lifetime-below-meta">
+											Unlimited runs · Mac, Windows, and Linux
+										</p>
+									</template>
+								</div>
+								<button
+									v-if="!pricing.hasLifetime && pricing.lifetimeCheckoutReady"
+									type="button"
+									class="lifetime-below-cta"
+									:disabled="pricing.lifetimeLoading"
+									@click="buyLifetime"
+								>
+									{{
+										pricing.lifetimeLoading
+											? "Waiting…"
+											: "Get Lifetime"
+									}}
+								</button>
+							</div>
+							<p
+								v-if="lifetimeError && showLifetimeBelow && !pricing.hasLifetime"
+								class="lifetime-below-error"
+								role="alert"
+							>
+								{{ lifetimeError }}
+							</p>
+						</section>
+
+					</div>
 
 					<footer class="sheet-foot">
 						<div class="stripe-trust">
@@ -144,7 +240,7 @@ function close() {
 							</p>
 						</div>
 						<p class="note">
-							Part of every paid license supports
+							Part of every paid migration supports
 							<a
 								href="https://www.marwell.org.uk/save-our-stripes/"
 								target="_blank"
@@ -153,6 +249,7 @@ function close() {
 							at Marwell Wildlife.
 						</p>
 					</footer>
+					</div>
 				</div>
 			</aside>
 		</Transition>
@@ -209,20 +306,37 @@ function close() {
 }
 
 .sheet-inner {
+	--sheet-pad-block: 2rem;
+	--sheet-pad-inline: 1.35rem;
 	height: 100%;
 	display: flex;
 	flex-direction: column;
-	justify-content: space-between;
-	gap: 0.9rem;
-	padding: 1.5rem 1.3rem 1.35rem;
+	justify-content: center;
+	padding: var(--sheet-pad-block) var(--sheet-pad-inline);
 	box-sizing: border-box;
 	min-height: 0;
+	overflow-y: auto;
+	scrollbar-width: thin;
 	background: linear-gradient(
 		165deg,
 		#fff 0%,
 		#fafafa 42%,
 		#f5f5f5 100%
 	);
+}
+
+.sheet-body {
+	width: 100%;
+	margin-block: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 1.15rem;
+}
+
+.sheet-main {
+	display: flex;
+	flex-direction: column;
+	gap: 1rem;
 }
 
 .x {
@@ -253,198 +367,331 @@ function close() {
 }
 
 h2 {
-	margin: 0 0 0.5rem;
+	margin: 0 0 0.65rem;
 	font-size: 1.55rem;
 	font-weight: 700;
 	line-height: 1.1;
 	letter-spacing: -0.035em;
 }
 
-.lead {
+.sheet-prose {
 	margin: 0;
 	font-size: 0.8125rem;
-	line-height: 1.48;
+	line-height: 1.55;
 	color: var(--muted);
 }
 
-.lead-2 {
-	margin-top: 0.45rem;
-}
-
-.lead-backup {
-	margin-top: 0.4rem;
-	font-size: 0.78rem;
-}
-
-.lead strong {
+.sheet-prose strong {
 	color: var(--fg);
 	font-weight: 600;
 }
 
-.plans-loading {
-	margin: 0;
-	font-size: 0.72rem;
-	color: var(--muted);
-	text-align: center;
-}
-
-.plans.is-loading {
-	opacity: 0.55;
-	pointer-events: none;
-}
-
-.plans {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-	flex: 1 1 auto;
-	min-height: 0;
-	display: grid;
-	grid-template-columns: 1fr 1fr;
-	grid-template-rows: 1fr 1fr;
-	gap: 0.6rem;
-	align-content: stretch;
-}
-
-.plan {
-	position: relative;
-	border: 1px solid var(--border);
-	border-radius: var(--radius-card);
-	padding: 0.75rem 0.75rem 0.7rem;
-	background: var(--surface);
+.pricing-hero {
+	--pricing-accent: #8aad82;
+	--pricing-accent-deep: #5a7a52;
+	--pricing-gray: #525252;
+	--pricing-gray-soft: #a3a3a3;
+	flex-shrink: 0;
 	display: flex;
 	flex-direction: column;
-	justify-content: space-between;
-	gap: 0.35rem;
-	min-height: 0;
-	height: 100%;
-	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.04);
-	transition:
-		border-color 0.2s ease,
-		box-shadow 0.2s ease,
-		transform 0.2s ease;
+	gap: 0.5rem;
+	transition: opacity 0.25s ease;
 }
 
-.plan:hover {
-	transform: translateY(-1px);
-	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.06);
-}
-
-.plan-badge {
-	align-self: flex-start;
-	display: inline-block;
-	padding: 0.18rem 0.5rem;
-	border-radius: var(--radius-pill);
-	font-size: 0.6rem;
-	font-weight: 700;
-	letter-spacing: 0.04em;
-	text-transform: uppercase;
-	color: var(--muted);
-	background: var(--btn-secondary);
-	line-height: 1.2;
-}
-
-.plan-body {
+.hero-rules {
+	--rule-pad-block: 1.05rem;
+	--rule-pad-inline: 0.85rem;
+	--rule-inner-gap: 0.45rem;
+	--rule-min-height: 7.5rem;
 	display: flex;
-	flex-direction: column;
-	justify-content: space-between;
-	gap: 0.4rem;
+	align-items: stretch;
+	border-radius: 1.25rem;
+	box-shadow: 0 10px 28px rgba(0, 0, 0, 0.12);
+}
+
+.rule-divider {
+	flex-shrink: 0;
+	width: 1px;
+	align-self: stretch;
+	background: color-mix(in srgb, var(--fg) 22%, transparent);
+	transform-origin: center center;
+}
+
+.rule {
+	box-sizing: border-box;
 	flex: 1;
-	min-height: 0;
+	min-width: 0;
+	display: grid;
+	grid-template-rows: min-content 1fr min-content;
+	align-content: center;
+	justify-items: center;
+	text-align: center;
+	gap: var(--rule-inner-gap);
+	padding: var(--rule-pad-block) var(--rule-pad-inline);
+	min-height: var(--rule-min-height);
+	box-shadow: none;
 }
 
-.plan-copy {
-	display: flex;
-	flex-direction: column;
-	gap: 0.15rem;
-}
-
-.plan h3 {
-	margin: 0;
-	font-family: var(--font-display);
-	font-size: 0.875rem;
-	font-weight: 700;
-	line-height: 1.15;
-	letter-spacing: -0.02em;
-}
-
-.tagline {
-	margin: 0;
-	font-size: 0.6875rem;
-	color: var(--muted-light);
-	line-height: 1.35;
-}
-
-.price {
-	margin: 0;
-	font-family: var(--font-display);
-	font-size: 1.35rem;
-	font-weight: 800;
-	letter-spacing: -0.04em;
-	line-height: 1;
-}
-
-.plan--free {
+.rule--free {
+	position: relative;
+	overflow: hidden;
+	border-radius: 1.25rem 0 0 1.25rem;
 	border: 1px solid #525252;
-	background: repeating-linear-gradient(
+	border-right: none;
+	background-color: #3a3a3a;
+	background-image: repeating-linear-gradient(
 		-42deg,
-		#3a3a3a,
+		#3a3a3a 0,
 		#3a3a3a 9px,
 		#454545 9px,
 		#454545 18px
 	);
-	box-shadow: 0 12px 36px rgba(0, 0, 0, 0.16);
 }
 
-.plan--free:hover {
-	transform: translateY(-1px);
-	box-shadow: 0 16px 44px rgba(0, 0, 0, 0.22);
-	border-color: #5c5c5c;
+.rule--free > * {
+	position: relative;
+	z-index: 1;
 }
 
-.plan--free .plan-badge {
-	color: #fff;
-	background: rgba(255, 255, 255, 0.12);
-	border: 1px solid rgba(255, 255, 255, 0.22);
+.rule--paid {
+	border-radius: 0 1.25rem 1.25rem 0;
+	border: 1px solid color-mix(in srgb, var(--pricing-accent) 35%, var(--border));
+	border-left: none;
+	background: linear-gradient(
+		155deg,
+		color-mix(in srgb, var(--pricing-accent) 18%, #fff) 0%,
+		#fff 55%,
+		#fafafa 100%
+	);
+}
+
+.pricing-or {
+	display: flex;
+	align-items: center;
+	gap: 0.6rem;
+	margin: 0;
+	font-size: 0.62rem;
+	font-weight: 600;
+	letter-spacing: 0.14em;
+	text-transform: lowercase;
+	color: var(--muted-light);
+}
+
+.pricing-or::before,
+.pricing-or::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: color-mix(in srgb, var(--fg) 10%, transparent);
+}
+
+.lifetime-below {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	padding: 0.85rem 1rem;
+	border-radius: 1.25rem;
+	border: 1px solid color-mix(in srgb, var(--pricing-gray) 18%, var(--border));
+	background: linear-gradient(
+		155deg,
+		#f0f0f0 0%,
+		#f7f7f7 52%,
+		#fafafa 100%
+	);
+	box-shadow: 0 8px 22px rgba(0, 0, 0, 0.07);
+}
+
+.lifetime-below--active {
+	border-color: color-mix(in srgb, var(--pricing-gray) 28%, var(--border));
+	background: linear-gradient(
+		155deg,
+		#e8e8e8 0%,
+		#f2f2f2 52%,
+		#f7f7f7 100%
+	);
+}
+
+.lifetime-below-main {
+	min-width: 0;
+	flex: 1;
+}
+
+.lifetime-below-kicker {
+	margin: 0;
+	font-size: 0.62rem;
 	font-weight: 700;
+	letter-spacing: 0.1em;
+	text-transform: uppercase;
+	color: var(--pricing-gray-soft);
 }
 
-.plan--free h3 {
-	color: #fff;
+.lifetime-below--active .lifetime-below-kicker {
+	color: color-mix(in srgb, var(--pricing-gray) 55%, var(--muted));
 }
 
-.plan--free .tagline {
-	color: rgba(255, 255, 255, 0.62);
+.lifetime-below-price {
+	margin: 0.2rem 0 0;
+	font-family: var(--font-display);
+	font-size: 1.65rem;
+	font-weight: 800;
+	letter-spacing: -0.04em;
+	line-height: 1;
+	color: var(--fg);
 }
 
-.plan--free .price {
-	color: #fff;
+.lifetime-below-title {
+	margin: 0.2rem 0 0;
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+	font-family: var(--font-display);
+	font-size: 1.05rem;
+	font-weight: 700;
+	letter-spacing: -0.03em;
+	color: var(--fg);
 }
 
-.plan--plus {
-	border-color: #e8e8e8;
+.lifetime-below-check {
+	font-size: 1.15rem;
+	font-weight: 800;
+	color: var(--pricing-gray);
 }
 
-.plan--starter.plan--featured {
-	border-color: var(--fg);
-	box-shadow: var(--shadow-soft);
-}
-
-.plan--pro {
-	border-color: #d4d4d4;
-	background: linear-gradient(160deg, #fff 0%, #fafafa 55%, #f4f4f4 100%);
-}
-
-.plan--pro .plan-badge {
+.lifetime-below-meta {
+	margin: 0.25rem 0 0;
+	font-size: 0.7rem;
+	line-height: 1.4;
 	color: var(--muted);
-	background: var(--btn-secondary);
+}
+
+.lifetime-below-cta {
+	flex-shrink: 0;
+	padding: 0.5rem 0.85rem;
+	border: none;
+	border-radius: var(--radius-pill);
+	background: var(--fg);
+	color: var(--surface);
+	font-size: 0.72rem;
+	font-weight: 700;
+	cursor: pointer;
+	transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.lifetime-below-cta:hover:not(:disabled) {
+	opacity: 0.9;
+	transform: translateY(-1px);
+}
+
+.lifetime-below-cta:disabled {
+	opacity: 0.55;
+	cursor: not-allowed;
+}
+
+.lifetime-below-error {
+	margin: 0;
+	font-size: 0.72rem;
+	color: #b42318;
+	text-align: center;
+}
+
+.rule-kicker {
+	margin: 0;
+	min-height: 1.35rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0.62rem;
+	font-weight: 700;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	line-height: 1.2;
+}
+
+.rule--free .rule-kicker {
+	color: rgba(255, 255, 255, 0.55);
+}
+
+.rule--paid .rule-kicker {
+	color: color-mix(in srgb, var(--pricing-accent-deep) 85%, var(--muted));
+}
+
+.rule-value {
+	margin: 0;
+	width: 100%;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	align-self: center;
+	gap: 0.12rem;
+	min-height: 2.75rem;
+	padding-inline: 0.1rem;
+	line-height: 1;
+}
+
+.rule-num {
+	font-family: var(--font-display);
+	font-size: 2.45rem;
+	font-weight: 800;
+	letter-spacing: -0.05em;
+	line-height: 1;
+	max-width: 100%;
+}
+
+.rule--paid .rule-num {
+	font-size: clamp(1.85rem, 7.5vw, 2.35rem);
+}
+
+.rule--free .rule-value {
+	align-items: baseline;
+}
+
+.rule--free .rule-num,
+.rule--free .rule-unit {
+	color: #fff;
+}
+
+.rule--paid .rule-num {
+	color: var(--fg);
+}
+
+.rule-unit {
+	font-family: var(--font-display);
+	font-size: 1.05rem;
+	font-weight: 700;
+	letter-spacing: -0.02em;
+	line-height: 1;
+}
+
+.rule--free .rule-unit {
+	opacity: 0.88;
+}
+
+.rule-label {
+	margin: 0;
+	min-height: 1.1rem;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 0.74rem;
+	font-weight: 600;
+	line-height: 1.2;
+}
+
+.rule--free .rule-label {
+	color: rgba(255, 255, 255, 0.72);
+}
+
+.rule--paid .rule-label {
+	color: var(--muted);
 }
 
 .sheet-foot {
-	flex-shrink: 0;
 	display: flex;
 	flex-direction: column;
-	gap: 0.85rem;
+	gap: 0.5rem;
+	padding-top: 1rem;
+	border-top: 1px solid color-mix(in srgb, var(--border) 75%, transparent);
 }
 
 .stripe-trust {
@@ -508,7 +755,6 @@ h2 {
 	from {
 		stroke-dashoffset: 1;
 	}
-
 	to {
 		stroke-dashoffset: 0;
 	}
@@ -517,36 +763,69 @@ h2 {
 @keyframes sheet-head-in {
 	from {
 		opacity: 0;
-		transform: translateX(-18px);
+		transform: translateX(2rem);
 	}
-
 	to {
 		opacity: 1;
 		transform: translateX(0);
 	}
 }
 
-@keyframes sheet-card-deal {
+@keyframes hero-rules-in {
 	from {
 		opacity: 0;
-		transform: translateX(22px) scale(0.94) rotate(2deg);
+		transform: translateX(2.35rem) scale(0.97);
 	}
-
 	to {
 		opacity: 1;
-		transform: translateX(0) scale(1) rotate(0deg);
+		transform: none;
+	}
+}
+
+@keyframes pricing-rtl {
+	from {
+		opacity: 0;
+		transform: translateX(1.65rem);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0);
+	}
+}
+
+@keyframes pricing-rtl-num {
+	from {
+		opacity: 0;
+		transform: translateX(2.1rem) scale(0.9);
+	}
+	72% {
+		transform: translateX(-0.06rem) scale(1.02);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0) scale(1);
+	}
+}
+
+@keyframes rule-divider-in {
+	from {
+		opacity: 0;
+		transform: translateX(0.65rem) scaleY(0.12);
+	}
+	to {
+		opacity: 1;
+		transform: translateX(0) scaleY(1);
 	}
 }
 
 @keyframes sheet-foot-in {
 	from {
 		opacity: 0;
-		transform: translateY(10px);
+		transform: translateX(1.5rem);
 	}
-
 	to {
 		opacity: 1;
-		transform: translateY(0);
+		transform: translateX(0);
 	}
 }
 
@@ -555,11 +834,9 @@ h2 {
 		opacity: 0;
 		transform: scale(0.55) rotate(-90deg);
 	}
-
 	70% {
 		transform: scale(1.08) rotate(6deg);
 	}
-
 	100% {
 		opacity: 1;
 		transform: scale(1) rotate(0deg);
@@ -573,40 +850,70 @@ h2 {
 }
 
 .sheet-enter-active .sheet-head {
-	animation: sheet-head-in 0.55s cubic-bezier(0.16, 1, 0.3, 1) 0.2s backwards;
+	animation: sheet-head-in 0.58s cubic-bezier(0.19, 1, 0.22, 1) 0.14s backwards;
 }
 
-.sheet-enter-active .plan {
-	animation: sheet-card-deal 0.5s cubic-bezier(0.34, 1.18, 0.64, 1) backwards;
+.sheet-enter-active .sheet-prose {
+	animation: pricing-rtl 0.52s cubic-bezier(0.19, 1, 0.22, 1) 0.2s backwards;
 }
 
-.sheet-enter-active .plan:nth-child(1) {
-	animation-delay: 0.28s;
+.sheet-enter-active .hero-rules {
+	animation: hero-rules-in 0.6s cubic-bezier(0.19, 1, 0.22, 1) 0.26s backwards;
 }
 
-.sheet-enter-active .plan:nth-child(2) {
-	animation-delay: 0.34s;
+/* Right → left: paid card first, then divider, then free card */
+.sheet-enter-active .rule--paid .rule-kicker {
+	animation: pricing-rtl 0.48s cubic-bezier(0.19, 1, 0.22, 1) 0.3s backwards;
 }
 
-.sheet-enter-active .plan:nth-child(3) {
-	animation-delay: 0.4s;
+.sheet-enter-active .rule--paid .rule-num {
+	animation: pricing-rtl-num 0.56s cubic-bezier(0.19, 1, 0.22, 1) 0.34s backwards;
 }
 
-.sheet-enter-active .plan:nth-child(4) {
-	animation-delay: 0.46s;
+.sheet-enter-active .rule--paid .rule-label {
+	animation: pricing-rtl 0.44s cubic-bezier(0.19, 1, 0.22, 1) 0.38s backwards;
+}
+
+.sheet-enter-active .rule-divider {
+	transform-origin: center center;
+	animation: rule-divider-in 0.42s cubic-bezier(0.19, 1, 0.22, 1) 0.42s backwards;
+}
+
+.sheet-enter-active .rule--free .rule-kicker {
+	animation: pricing-rtl 0.48s cubic-bezier(0.19, 1, 0.22, 1) 0.46s backwards;
+}
+
+.sheet-enter-active .rule--free .rule-num {
+	animation: pricing-rtl-num 0.56s cubic-bezier(0.19, 1, 0.22, 1) 0.5s backwards;
+}
+
+.sheet-enter-active .rule--free .rule-unit {
+	animation: pricing-rtl 0.4s cubic-bezier(0.19, 1, 0.22, 1) 0.54s backwards;
+}
+
+.sheet-enter-active .rule--free .rule-label {
+	animation: pricing-rtl 0.44s cubic-bezier(0.19, 1, 0.22, 1) 0.58s backwards;
+}
+
+.sheet-enter-active .pricing-or {
+	animation: pricing-rtl 0.4s cubic-bezier(0.19, 1, 0.22, 1) 0.5s backwards;
+}
+
+.sheet-enter-active .lifetime-below {
+	animation: hero-rules-in 0.55s cubic-bezier(0.19, 1, 0.22, 1) 0.56s backwards;
 }
 
 .sheet-enter-active .stripe-trust,
 .sheet-enter-active .sheet-foot .note {
-	animation: sheet-foot-in 0.48s cubic-bezier(0.16, 1, 0.3, 1) backwards;
+	animation: sheet-foot-in 0.5s cubic-bezier(0.19, 1, 0.22, 1) backwards;
 }
 
 .sheet-enter-active .stripe-trust {
-	animation-delay: 0.52s;
+	animation-delay: 0.62s;
 }
 
 .sheet-enter-active .sheet-foot .note {
-	animation-delay: 0.58s;
+	animation-delay: 0.66s;
 }
 
 .sheet-enter-active .x {
@@ -615,10 +922,7 @@ h2 {
 
 @media (prefers-reduced-motion: reduce) {
 	.scrim-enter-active,
-	.scrim-leave-active {
-		transition-duration: 0.01ms !important;
-	}
-
+	.scrim-leave-active,
 	.sheet-enter-active,
 	.sheet-leave-active {
 		transition-duration: 0.01ms !important;
@@ -626,7 +930,15 @@ h2 {
 
 	.sheet-enter-active .sheet-wave-border-path,
 	.sheet-enter-active .sheet-head,
-	.sheet-enter-active .plan,
+	.sheet-enter-active .hero-rules,
+	.sheet-enter-active .rule-divider,
+	.sheet-enter-active .rule-kicker,
+	.sheet-enter-active .rule-num,
+	.sheet-enter-active .rule-unit,
+	.sheet-enter-active .rule-label,
+	.sheet-enter-active .pricing-or,
+	.sheet-enter-active .lifetime-below,
+	.sheet-enter-active .sheet-prose,
 	.sheet-enter-active .stripe-trust,
 	.sheet-enter-active .sheet-foot .note,
 	.sheet-enter-active .x {
@@ -687,50 +999,48 @@ h2 {
 
 	.sheet-inner {
 		--sheet-wave-strip: 22%;
-		--sheet-pad-block: 2.35rem;
+		--sheet-pad-block: 2rem;
+		--sheet-pad-inline: 1.85rem;
 		position: relative;
 		z-index: 1;
 		box-sizing: border-box;
-		justify-content: space-between;
-		padding: var(--sheet-pad-block) 2.1rem var(--sheet-pad-block)
-			calc(var(--sheet-wave-strip) + 2rem);
-		gap: 0.75rem;
+		padding: var(--sheet-pad-block) var(--sheet-pad-inline) var(--sheet-pad-block)
+			calc(var(--sheet-wave-strip) + 1.75rem);
 	}
 
-	.plans {
-		flex: 0 0 auto;
-		width: 100%;
-		gap: 0.6rem;
-		grid-template-rows: repeat(2, 8.35rem);
-		align-content: stretch;
+	.sheet-body {
+		gap: 1.2rem;
 	}
 
-	.plan {
-		height: 100%;
-		min-height: 0;
-		padding: 0.78rem 0.75rem 0.72rem;
-		border-radius: 1.35rem;
-		gap: 0.3rem;
+	.sheet-main {
+		gap: 1.05rem;
 	}
 
-	.plan-body {
-		gap: 0.35rem;
+	.hero-rules {
+		--rule-pad-block: 1.15rem;
+		--rule-pad-inline: 0.75rem;
+		--rule-inner-gap: 0.5rem;
+		--rule-min-height: 8.5rem;
 	}
 
-	.plan--pro {
-		border-radius: 1.5rem;
+	.rule--free .rule-num {
+		font-size: 2.65rem;
+	}
+
+	.rule--paid .rule-num {
+		font-size: clamp(2rem, 5vw, 2.45rem);
+	}
+
+	.rule-value {
+		min-height: 3rem;
 	}
 
 	h2 {
 		font-size: 1.75rem;
 	}
 
-	.lead {
+	.sheet-prose {
 		font-size: 0.8375rem;
-	}
-
-	.price {
-		font-size: 1.35rem;
 	}
 
 	.sheet-enter-from.sheet-side,

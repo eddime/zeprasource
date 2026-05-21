@@ -27,6 +27,8 @@ export interface ConnectionTestResult {
 	folders?: ImapFolder[];
 }
 
+export type MigrationJobType = "migrate" | "backup";
+
 export type MigrationStatus =
 	| "pending"
 	| "running"
@@ -71,6 +73,7 @@ export interface MigrationRecord {
 	id: string;
 	sourceEmail: string;
 	destEmail: string;
+	jobType?: MigrationJobType;
 	status: MigrationStatus;
 	foldersTotal: number;
 	foldersCompleted: number;
@@ -89,6 +92,10 @@ export interface AppSettings {
 	telemetryEnabled: boolean;
 	/** Last parent directory chosen for optional local .eml backup. */
 	lastBackupParentDir?: string;
+	/** Server-signed `zepra_lt.…` license — verified via Zepra Server, not trusted alone. */
+	lifetimeLicense?: string;
+	/** ISO timestamp of last successful server verification. */
+	lifetimeVerifiedAt?: string;
 }
 
 export type BackupDiskCheck = {

@@ -1,24 +1,25 @@
 import Stripe from "stripe";
 import { hashFolderSelection } from "../../../shared/migration-payment";
-import { FREE_MIGRATION_LIMIT_BYTES, getPricingTier, requiresPaidPlan } from "../../../shared/pricing";
-import type { PaidMigrationTierId } from "../../../shared/stripe-checkout";
+import {
+	billableGigabytes,
+	requiresPaidPlan,
+} from "../../../shared/pricing";
+import { parseFreeMigrationGb } from "../../../shared/stripe-migration-catalog";
 import { getDatabase } from "../../db/database";
 import {
 	issueMigrationLaunchTicket,
 	parseMigrationLaunchTicket,
 } from "./migration-launch-ticket";
-import {
-	getStripeSecretKey,
-	isStripeConfigured,
-	lookupKeyForTier,
-} from "./stripe-config";
+import { isLifetimeActive } from "../lifetime/lifetime-entitlement";
+import { getMigrationPricingCatalog } from "./migration-pricing-catalog";
+import { getStripeSecretKey, isStripeConfigured } from "./stripe-config";
 
 const ENTITLEMENT_TTL_MS = 45 * 60 * 1000;
 
 export type VerifiedLaunchLicense = {
 	jti: string;
 	stripeSessionId: string;
-	tierId: PaidMigrationTierId;
+	billableGb: number;
 	totalBytes: number;
 	messageCount: number;
 	folderPathsHash: string;
@@ -32,10 +33,33 @@ function createStripeClient(): Stripe {
 	return new Stripe(secretKey);
 }
 
+function freeLimitBytesFromSessionMetadata(
+	session: Stripe.Checkout.Session,
+): number {
+	const fromMeta = parseFreeMigrationGb(session.metadata);
+	if (fromMeta != null) {
+		return fromMeta * 1024 ** 3;
+	}
+	return 0;
+}
+
+async function resolveFreeLimitBytesForSession(
+	session: Stripe.Checkout.Session,
+): Promise<number> {
+	const fromSession = freeLimitBytesFromSessionMetadata(session);
+	if (fromSession > 0) return fromSession;
+
+	const catalog = await getMigrationPricingCatalog();
+	if (!catalog.configured) {
+		throw new Error("Stripe pricing is not configured.");
+	}
+	return catalog.freeLimitBytes;
+}
+
 export async function verifyStripeCheckoutSessionPaid(
 	sessionId: string,
 	expected: {
-		tierId: PaidMigrationTierId;
+		billableGb: number;
 		totalBytes: number;
 		messageCount: number;
 		folderPathsHash: string;
@@ -50,9 +74,11 @@ export async function verifyStripeCheckoutSessionPaid(
 		throw new Error("Stripe checkout is not paid.");
 	}
 
-	const tierId = session.metadata?.tier_id;
-	if (tierId !== expected.tierId) {
-		throw new Error("Payment tier does not match this migration.");
+	const freeLimitBytes = await resolveFreeLimitBytesForSession(session);
+
+	const billableGb = Number(session.metadata?.billable_gb ?? NaN);
+	if (billableGb !== expected.billableGb) {
+		throw new Error("Payment does not match the billed gigabytes.");
 	}
 
 	const totalBytes = Number(session.metadata?.total_bytes ?? NaN);
@@ -67,42 +93,40 @@ export async function verifyStripeCheckoutSessionPaid(
 		throw new Error("Payment does not match the current folder selection.");
 	}
 
-	const expectedTier = getPricingTier(expected.totalBytes);
-	if (expectedTier.id !== expected.tierId) {
-		throw new Error("Payment tier does not match mailbox size.");
+	if (billableGigabytes(expected.totalBytes, freeLimitBytes) !== expected.billableGb) {
+		throw new Error("Payment does not match mailbox size.");
 	}
 
-	const priceId = await resolvePriceId(stripe, expected.tierId);
+	const catalog = await getMigrationPricingCatalog();
+	const expectedPriceId = catalog.priceId;
+	const metadataPriceId = session.metadata?.stripe_price_id ?? null;
 	const lineItem = session.line_items?.data?.[0];
 	const paidPriceId =
 		typeof lineItem?.price === "object" && lineItem.price
 			? lineItem.price.id
 			: null;
-	if (paidPriceId && paidPriceId !== priceId) {
-		throw new Error("Stripe line item does not match the required plan.");
-	}
-}
 
-async function resolvePriceId(
-	stripe: Stripe,
-	tierId: PaidMigrationTierId,
-): Promise<string> {
-	const prices = await stripe.prices.list({
-		lookup_keys: [lookupKeyForTier(tierId)],
-		limit: 1,
-		active: true,
-	});
-	const price = prices.data[0];
-	if (!price?.id) {
-		throw new Error(`Stripe price missing for tier "${tierId}".`);
+	if (expectedPriceId && paidPriceId && paidPriceId !== expectedPriceId) {
+		throw new Error("Stripe line item does not match the per-GB price.");
 	}
-	return price.id;
+	if (
+		expectedPriceId &&
+		metadataPriceId &&
+		metadataPriceId !== expectedPriceId
+	) {
+		throw new Error("Checkout metadata does not match the per-GB price.");
+	}
+
+	const quantity = lineItem?.quantity ?? 0;
+	if (quantity !== expected.billableGb) {
+		throw new Error("Stripe quantity does not match billed gigabytes.");
+	}
 }
 
 /** After Stripe checkout — issues a signed launch ticket (the only client-facing license). */
 export async function grantMigrationLaunchTicket(input: {
 	sessionId: string;
-	tierId: PaidMigrationTierId;
+	billableGb: number;
 	totalBytes: number;
 	messageCount: number;
 	folderPaths: string[];
@@ -110,7 +134,7 @@ export async function grantMigrationLaunchTicket(input: {
 	const folderPathsHash = hashFolderSelection(input.folderPaths);
 
 	await verifyStripeCheckoutSessionPaid(input.sessionId, {
-		tierId: input.tierId,
+		billableGb: input.billableGb,
 		totalBytes: input.totalBytes,
 		messageCount: input.messageCount,
 		folderPathsHash,
@@ -126,7 +150,7 @@ export async function grantMigrationLaunchTicket(input: {
 
 	return issueMigrationLaunchTicket({
 		stripeSessionId: input.sessionId,
-		tierId: input.tierId,
+		billableGb: input.billableGb,
 		totalBytes: input.totalBytes,
 		messageCount: input.messageCount,
 		folderPathsHash,
@@ -134,13 +158,18 @@ export async function grantMigrationLaunchTicket(input: {
 	});
 }
 
-export function verifyMigrationLaunchTicket(input: {
+export async function verifyMigrationLaunchTicket(input: {
 	launchTicket: string;
 	folderPaths: string[];
 	totalBytes: number;
 	messageCount: number;
-}): VerifiedLaunchLicense {
-	if (!requiresPaidPlan(input.totalBytes)) {
+}): Promise<VerifiedLaunchLicense> {
+	const catalog = await getMigrationPricingCatalog();
+	if (!catalog.configured) {
+		throw new Error("Paid migrations require Stripe pricing.");
+	}
+
+	if (!requiresPaidPlan(input.totalBytes, catalog.freeLimitBytes)) {
 		throw new Error("Migration license is not required for this size.");
 	}
 	if (!isStripeConfigured()) {
@@ -149,6 +178,10 @@ export function verifyMigrationLaunchTicket(input: {
 
 	const payload = parseMigrationLaunchTicket(input.launchTicket);
 	const folderPathsHash = hashFolderSelection(input.folderPaths);
+	const expectedGb = billableGigabytes(
+		input.totalBytes,
+		catalog.freeLimitBytes,
+	);
 
 	if (
 		payload.bytes !== input.totalBytes ||
@@ -160,8 +193,8 @@ export function verifyMigrationLaunchTicket(input: {
 		);
 	}
 
-	if (getPricingTier(input.totalBytes).id !== payload.tier) {
-		throw new Error("License tier does not match the current mailbox size.");
+	if (payload.gb !== expectedGb) {
+		throw new Error("License does not match the billed gigabytes.");
 	}
 
 	const db = getDatabase();
@@ -175,7 +208,7 @@ export function verifyMigrationLaunchTicket(input: {
 	return {
 		jti: payload.jti,
 		stripeSessionId: payload.sid,
-		tierId: payload.tier,
+		billableGb: payload.gb,
 		totalBytes: payload.bytes,
 		messageCount: payload.msgs,
 		folderPathsHash: payload.fhash,
@@ -209,14 +242,23 @@ export async function assertPaidMigrationCanStart(input: {
 	totalBytes: number;
 	messageCount: number;
 }): Promise<VerifiedLaunchLicense | null> {
-	if (!requiresPaidPlan(input.totalBytes)) {
+	const catalog = await getMigrationPricingCatalog();
+	if (!catalog.configured) {
+		throw new Error("Stripe pricing is not configured.");
+	}
+
+	if (!requiresPaidPlan(input.totalBytes, catalog.freeLimitBytes)) {
+		return null;
+	}
+
+	if (await isLifetimeActive()) {
 		return null;
 	}
 	if (!input.launchTicket?.trim()) {
 		throw new Error("Payment is required before starting this migration.");
 	}
 
-	const license = verifyMigrationLaunchTicket({
+	const license = await verifyMigrationLaunchTicket({
 		launchTicket: input.launchTicket,
 		folderPaths: input.folderPaths,
 		totalBytes: input.totalBytes,
@@ -224,7 +266,7 @@ export async function assertPaidMigrationCanStart(input: {
 	});
 
 	await verifyStripeCheckoutSessionPaid(license.stripeSessionId, {
-		tierId: license.tierId,
+		billableGb: license.billableGb,
 		totalBytes: license.totalBytes,
 		messageCount: license.messageCount,
 		folderPathsHash: license.folderPathsHash,
@@ -254,8 +296,13 @@ export async function assertMigrationResumeLicense(
 
 	if (!row) return;
 
+	const catalog = await getMigrationPricingCatalog();
+	const freeLimitBytes = catalog.configured
+		? catalog.freeLimitBytes
+		: 2 * 1024 ** 3;
+
 	const licensedBytes = row.licensed_total_bytes ?? 0;
-	if (licensedBytes <= FREE_MIGRATION_LIMIT_BYTES) {
+	if (licensedBytes <= freeLimitBytes) {
 		return;
 	}
 

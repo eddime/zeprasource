@@ -54,9 +54,10 @@ export async function sweepFailedMessages(options: {
 	mappings: FolderMapping[];
 	source: MailboxCredentials;
 	destination: MailboxCredentials;
-	destClient: Awaited<ReturnType<typeof createImapClient>>;
+	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
 	transfer: MigrationTransferConfig;
 	backupRootPath: string | null;
+	backupOnly: boolean;
 	markMessage: MarkMessageFn;
 	hooksForMapping: (mapping: FolderMapping) => FolderTransferHooks;
 }): Promise<number> {
@@ -76,6 +77,7 @@ export async function sweepFailedMessages(options: {
 			pendingUids: failedUids,
 			transfer: options.transfer,
 			backupRootPath: options.backupRootPath,
+			backupOnly: options.backupOnly,
 			markMessage: options.markMessage,
 			hooks,
 		});

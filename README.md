@@ -24,6 +24,7 @@ MailPort transfers email **directly between IMAP servers on your machine**. No c
 - Resume failed/paused migrations
 - Encrypted local credential vault
 - Google & Microsoft OAuth sign-in (see [docs/OAUTH.md](docs/OAUTH.md))
+- Stripe per-GB migration pricing (see [docs/STRIPE.md](docs/STRIPE.md))
 
 ## Development
 
@@ -42,11 +43,12 @@ This starts:
 
 The desktop app loads the Vite dev server only when it sees the `X-Zepra-Dev` header (so it never picks up another project on port 5173).
 
-### OAuth (optional)
+### OAuth & Stripe (optional)
 
 ```bash
 cp .env.example .env
-# Edit .env with Google/Microsoft client IDs — see docs/OAUTH.md
+# Google/Microsoft — docs/OAUTH.md
+# Paid migrations — docs/STRIPE.md (STRIPE_SECRET_KEY + Dashboard price/metadata)
 ```
 
 ### Other commands
