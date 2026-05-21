@@ -4,7 +4,11 @@ import type { MigrationTransferConfig } from "./migration-autopilot";
 import { logger } from "../../utils/logger";
 import { copyMessagesUidBatch } from "../imap/imap-copy-batch";
 import { resolveDestinationDuplicateIds } from "../imap/destination-dedup-cache";
-import { fetchEnvelopeBatch, type FetchedMigrationMessage } from "../imap/imap-client";
+import type { FetchedEnvelope, FetchedMigrationMessage } from "../imap/imap-client";
+import {
+	buildUidBatchesByByteBudget,
+	buildUidBatchesByCount,
+} from "./migration-fetch-batches";
 import { normalizeMessageId } from "../imap/destination-message-index";
 import { toAppendPayload } from "../imap/imap-append-batch";
 import type { ResilientMailSource } from "../mail/resilient-mail-source";
@@ -153,6 +157,80 @@ async function prepareMessage(
 		return "skip";
 	}
 	return { msg, reservedMessageIdKey: key };
+}
+
+type FolderFetchPlan = {
+	batches: number[][];
+	envelopes: Map<number, FetchedEnvelope>;
+};
+
+async function planFolderFetch(ctx: TransferContext, uids: number[]): Promise<FolderFetchPlan> {
+	const maxBytes = ctx.transfer.fetchByteBudgetBytes;
+	const maxCount = ctx.transfer.fetchBatchSize;
+	if (ctx.resilientSource.current.protocol !== "imap") {
+		return {
+			batches: buildUidBatchesByCount(uids, maxCount),
+			envelopes: new Map(),
+		};
+	}
+	const envelopes = new Map<number, FetchedEnvelope>();
+	const envelopeChunk = Math.max(ctx.transfer.fetchBatchSize * 4, 120);
+	for (let i = 0; i < uids.length; i += envelopeChunk) {
+		const chunk = uids.slice(i, i + envelopeChunk);
+		const meta = await ctx.resilientSource.fetchEnvelopeBatch(ctx.mapping.sourcePath, chunk);
+		for (const row of meta) {
+			envelopes.set(row.uid, row);
+		}
+	}
+	const ordered = uids.map((uid) => envelopes.get(uid) ?? { uid, sizeBytes: undefined });
+	return {
+		batches: buildUidBatchesByByteBudget(ordered, maxBytes, maxCount),
+		envelopes,
+	};
+}
+
+async function skipDuplicateFromEnvelope(
+	ctx: TransferContext,
+	env: FetchedEnvelope,
+): Promise<boolean> {
+	if (ctx.backupOnly || !ctx.transfer.skipDuplicates || !env.messageId) {
+		return false;
+	}
+	const key = normalizeMessageId(env.messageId);
+	const skip = await ctx.duplicateLock.run(async () => {
+		if (ctx.destMessageIds.has(key)) return true;
+		ctx.destMessageIds.add(key);
+		return false;
+	});
+	if (!skip) return false;
+	if (ctx.staging) {
+		await ctx.staging.remove(ctx.mapping.sourcePath, env.uid);
+	}
+	ctx.markMessage(
+		ctx.db,
+		ctx.migrationId,
+		ctx.mapping.sourcePath,
+		env.uid,
+		"completed",
+		0,
+		env.messageId,
+	);
+	ctx.hooks.onMessageCompleted(env.uid, 0);
+	return true;
+}
+
+async function uidsNeedingBodyFetch(
+	ctx: TransferContext,
+	batchUids: number[],
+	envelopes: Map<number, FetchedEnvelope>,
+): Promise<number[]> {
+	const need: number[] = [];
+	for (const uid of batchUids) {
+		const env = envelopes.get(uid) ?? { uid };
+		if (await skipDuplicateFromEnvelope(ctx, env)) continue;
+		need.push(uid);
+	}
+	return need;
 }
 
 async function releaseDuplicateReservation(
@@ -446,29 +524,44 @@ async function runStageLane(options: {
 }): Promise<void> {
 	const { ctx, uids, uploadQueue } = options;
 	const { resilientSource } = ctx;
-	const batchSize = ctx.transfer.fetchBatchSize;
+	const { batches, envelopes } = await planFolderFetch(ctx, uids);
 	let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
-	for (let i = 0; i < uids.length; i += batchSize) {
+
+	for (let b = 0; b < batches.length; b++) {
 		if (ctx.hooks.shouldStop()) return;
 		await ctx.hooks.waitWhilePaused();
 		if (ctx.hooks.shouldStop()) return;
 
-		const batchUids = uids.slice(i, i + batchSize);
-		const nextBatchUids = uids.slice(i + batchSize, i + 2 * batchSize);
+		const batchUids = batches[b]!;
+		const needBody = await uidsNeedingBodyFetch(ctx, batchUids, envelopes);
+		if (needBody.length === 0) {
+			if (ctx.transfer.interBatchPauseMs > 0) {
+				await Bun.sleep(ctx.transfer.interBatchPauseMs);
+			}
+			continue;
+		}
+
+		const nextBatch = batches[b + 1];
+		if (!prefetchedBatch && nextBatch) {
+			const nextNeed = await uidsNeedingBodyFetch(ctx, nextBatch, envelopes);
+			if (nextNeed.length > 0) {
+				prefetchedBatch = resilientSource.fetchMessagesBatch(
+					ctx.mapping.sourcePath,
+					nextNeed,
+				);
+			}
+		}
+
 		const currentFetch =
 			prefetchedBatch ??
-			resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, batchUids);
-		prefetchedBatch =
-			nextBatchUids.length > 0
-				? resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, nextBatchUids)
-				: undefined;
+			resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, needBody);
+		prefetchedBatch = undefined;
 
 		let messages: FetchedMigrationMessage[];
 		try {
 			messages = await currentFetch;
 		} catch {
-			prefetchedBatch = undefined;
-			for (const uid of batchUids) {
+			for (const uid of needBody) {
 				await stageSingleUid({ ctx, uid, uploadQueue });
 			}
 			continue;
@@ -477,7 +570,7 @@ async function runStageLane(options: {
 		const byUid = new Map(messages.map((m) => [m.uid, m]));
 		const stagedUids: number[] = [];
 
-		for (const uid of batchUids) {
+		for (const uid of needBody) {
 			const msg = byUid.get(uid);
 			if (!msg) {
 				await stageSingleUid({ ctx, uid, uploadQueue });
@@ -539,29 +632,44 @@ async function runFetchLane(options: {
 }): Promise<void> {
 	const { ctx, uids, queue } = options;
 	const { resilientSource } = ctx;
-	const batchSize = ctx.transfer.fetchBatchSize;
+	const { batches, envelopes } = await planFolderFetch(ctx, uids);
 	let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
-	for (let i = 0; i < uids.length; i += batchSize) {
+
+	for (let b = 0; b < batches.length; b++) {
 		if (ctx.hooks.shouldStop()) return;
 		await ctx.hooks.waitWhilePaused();
 		if (ctx.hooks.shouldStop()) return;
 
-		const batchUids = uids.slice(i, i + batchSize);
-		const nextBatchUids = uids.slice(i + batchSize, i + 2 * batchSize);
+		const batchUids = batches[b]!;
+		const needBody = await uidsNeedingBodyFetch(ctx, batchUids, envelopes);
+		if (needBody.length === 0) {
+			if (ctx.transfer.interBatchPauseMs > 0) {
+				await Bun.sleep(ctx.transfer.interBatchPauseMs);
+			}
+			continue;
+		}
+
+		const nextBatch = batches[b + 1];
+		if (!prefetchedBatch && nextBatch) {
+			const nextNeed = await uidsNeedingBodyFetch(ctx, nextBatch, envelopes);
+			if (nextNeed.length > 0) {
+				prefetchedBatch = resilientSource.fetchMessagesBatch(
+					ctx.mapping.sourcePath,
+					nextNeed,
+				);
+			}
+		}
+
 		const currentFetch =
 			prefetchedBatch ??
-			resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, batchUids);
-		prefetchedBatch =
-			nextBatchUids.length > 0
-				? resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, nextBatchUids)
-				: undefined;
+			resilientSource.fetchMessagesBatch(ctx.mapping.sourcePath, needBody);
+		prefetchedBatch = undefined;
 
 		let messages: FetchedMigrationMessage[];
 		try {
 			messages = await currentFetch;
 		} catch {
-			prefetchedBatch = undefined;
-			for (const uid of batchUids) {
+			for (const uid of needBody) {
 				await processUidWithRetries({ ctx, uid });
 			}
 			continue;
@@ -571,7 +679,7 @@ async function runFetchLane(options: {
 		const fetched: FetchedMigrationMessage[] = [];
 		const missingUids: number[] = [];
 
-		for (const uid of batchUids) {
+		for (const uid of needBody) {
 			const msg = byUid.get(uid);
 			if (msg) fetched.push(msg);
 			else missingUids.push(uid);

@@ -15,6 +15,7 @@ export type MigrationTransferConfig = typeof MIGRATION_TRANSFER_DEFAULTS & {
 	/** Always 1: one reused source IMAP session per migration. */
 	parallelConnections: 1;
 	fetchBatchSize: number;
+	fetchByteBudgetBytes: number;
 	interBatchPauseMs: number;
 	pipelineQueueDepth: number;
 	retryDelayDefaults: {
@@ -112,6 +113,7 @@ export function getTransferConfig(state: MigrationAutopilotState): MigrationTran
 		...MIGRATION_TRANSFER_DEFAULTS,
 		parallelConnections: 1,
 		fetchBatchSize: state.fetchBatchSize,
+		fetchByteBudgetBytes: profile.fetchByteBudgetBytes,
 		interBatchPauseMs: turbo ? Math.max(20, basePause - 25) : basePause,
 		pipelineQueueDepth: throttled
 			? Math.max(1, profile.pipelineQueueDepth - 1)

@@ -10,7 +10,11 @@ import {
 	type MailSourceSession,
 } from "./mail-source";
 import type { ImapFlow } from "imapflow";
-import type { FetchedMigrationMessage } from "../imap/imap-client";
+import {
+	fetchEnvelopeBatch,
+	type FetchedEnvelope,
+	type FetchedMigrationMessage,
+} from "../imap/imap-client";
 
 const MAX_RECONNECT_ATTEMPTS = 3;
 
@@ -62,6 +66,10 @@ export class ResilientMailSource {
 		return this.runWithReconnect((session) =>
 			fetchSourceMessagesBatch(session, folderPath, uids),
 		);
+	}
+
+	fetchEnvelopeBatch(folderPath: string, uids: number[]): Promise<FetchedEnvelope[]> {
+		return this.runImap((client) => fetchEnvelopeBatch(client, folderPath, uids));
 	}
 
 	/** IMAP-only operations (COPY, envelope fetch) with reconnect. */

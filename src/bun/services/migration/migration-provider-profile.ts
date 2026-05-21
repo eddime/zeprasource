@@ -8,6 +8,8 @@ export type MigrationProviderProfile = {
 	id: string;
 	fetchBatchSize: number;
 	maxFetchBatchSize: number;
+	/** Max total RFC822.SIZE per FETCH batch (byte-budget pipelining). */
+	fetchByteBudgetBytes: number;
 	interBatchPauseMs: number;
 	pipelineQueueDepth: number;
 	retryBaseMs: number;
@@ -20,6 +22,7 @@ const BASE: MigrationProviderProfile = {
 	id: "base",
 	fetchBatchSize: 30,
 	maxFetchBatchSize: 60,
+	fetchByteBudgetBytes: 3 * 1024 * 1024,
 	interBatchPauseMs: 50,
 	pipelineQueueDepth: 3,
 	retryBaseMs: 1_500,
@@ -79,6 +82,10 @@ export function resolveMigrationProviderProfile(
 		maxFetchBatchSize: Math.min(
 			sourceProfile.maxFetchBatchSize,
 			destProfile.maxFetchBatchSize,
+		),
+		fetchByteBudgetBytes: Math.min(
+			sourceProfile.fetchByteBudgetBytes,
+			destProfile.fetchByteBudgetBytes,
 		),
 		interBatchPauseMs: Math.max(
 			sourceProfile.interBatchPauseMs,

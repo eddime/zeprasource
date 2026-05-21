@@ -280,9 +280,10 @@ function parseFetchedMessage(
 export type FetchedEnvelope = {
 	uid: number;
 	messageId?: string;
+	sizeBytes?: number;
 };
 
-/** Lightweight FETCH for server-side COPY duplicate checks. */
+/** Lightweight FETCH (envelope + RFC822.SIZE) for skip-dup checks and byte-budget batching. */
 export async function fetchEnvelopeBatch(
 	client: ImapFlow,
 	folderPath: string,
@@ -291,15 +292,22 @@ export async function fetchEnvelopeBatch(
 	if (uids.length === 0) return [];
 	const lock = await client.getMailboxLock(folderPath);
 	try {
-		const results: FetchedEnvelope[] = [];
-		for await (const msg of client.fetch(uids, { envelope: true }, { uid: true })) {
+		const byUid = new Map<number, FetchedEnvelope>();
+		for await (const msg of client.fetch(
+			uids,
+			{ envelope: true, size: true },
+			{ uid: true },
+		)) {
 			if (!msg.uid) continue;
-			results.push({
+			byUid.set(msg.uid, {
 				uid: msg.uid,
 				messageId: msg.envelope?.messageId,
+				sizeBytes: typeof msg.size === "number" ? msg.size : undefined,
 			});
 		}
-		return results;
+		return uids
+			.filter((uid) => byUid.has(uid))
+			.map((uid) => byUid.get(uid)!);
 	} finally {
 		lock.release();
 	}
