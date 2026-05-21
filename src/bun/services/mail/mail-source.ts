@@ -1,7 +1,7 @@
 import { isPop3Access } from "../../../shared/mail-access";
 import type { MailboxCredentials } from "../../../shared/types";
 import {
-	createImapClient,
+	connectImapClient,
 	fetchFolderUids,
 	fetchMessagesBatch,
 	safeCloseImapClient,
@@ -27,8 +27,7 @@ export async function openMailSource(
 		const client = await createPop3Session(normalizePop3Credentials(credentials));
 		return { protocol: "pop3", client };
 	}
-	const client = await createImapClient(credentials, "migration");
-	await client.connect();
+	const client = await connectImapClient(credentials, "migration");
 	return { protocol: "imap", client };
 }
 

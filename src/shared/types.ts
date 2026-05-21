@@ -15,6 +15,8 @@ export interface MailboxCredentials {
 	accessProtocol?: MailAccessProtocol;
 	username?: string;
 	password?: string;
+	/** Shared hosting: cert may be for hoster domain, not mail hostname. */
+	relaxedTls?: boolean;
 }
 
 export interface ImapFolder {

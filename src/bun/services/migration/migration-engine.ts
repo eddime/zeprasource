@@ -63,7 +63,7 @@ import {
 	snapshotMigrationMailboxes,
 } from "./migration-resume";
 import {
-	createImapClient,
+	connectImapClient,
 	safeCloseImapClient,
 	ensureFolderExists,
 } from "../imap/imap-client";
@@ -340,10 +340,9 @@ export async function executeMigration(
 	}
 
 	const sourceSession = await openMailSource(source);
-	const destClient = backupOnly ? null : await createImapClient(destination);
+	const destClient = backupOnly ? null : await connectImapClient(destination);
 
 	try {
-		if (destClient) await destClient.connect();
 
 		syncMigrationCounters(migrationId);
 		const baseline = getMigrationProgressSnapshot(migrationId, "running", undefined, {

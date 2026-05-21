@@ -10,11 +10,9 @@ export { detectProviderFromEmail } from "../../../shared/mailbox-provider";
 
 /** Discovery — short timeouts; wrong hosts fail fast. */
 const AUTOCONFIG_FETCH_MS = 1_500;
-const DISCOVERY_BUDGET_MS = 8_000;
+const DISCOVERY_BUDGET_MS = 12_000;
 const DISCOVERY_PROBE_CONCURRENCY = 6;
 const DISCOVERY_BANNER_PROBE_MS = 2_000;
-/** Defer weak DNS guesses so SRV/autoconfig probes start first. */
-const DNS_GUESS_DELAY_MS = 700;
 /** In-memory prefetch (per app session, per domain) — no disk persistence. */
 const PREFETCH_TTL_MS = 60_000;
 
@@ -282,19 +280,23 @@ async function imapCandidatesFromDnsGuesses(domain: string): Promise<ImapDiscove
 	const checks = await Promise.all(
 		hosts.map(async (host) => ({ host, ok: await hostResolves(host) })),
 	);
-	return checks
-		.filter((c) => c.ok)
-		.map(({ host }) =>
+	const out: ImapDiscoveryCandidate[] = [];
+	for (const { host, ok } of checks) {
+		if (!ok) continue;
+		const basePriority = host.startsWith("imap.") ? 40 : 45;
+		// Many shared hosts use STARTTLS on 143 (993 may be closed).
+		out.push(
 			toImapCandidate(
-				{
-					host,
-					port: 993,
-					secure: true,
-					source: "guess",
-				},
-				host.startsWith("imap.") ? 40 : 45,
+				{ host, port: 143, secure: false, source: "guess" },
+				basePriority - 2,
+			),
+			toImapCandidate(
+				{ host, port: 993, secure: true, source: "guess" },
+				basePriority,
 			),
 		);
+	}
+	return out;
 }
 
 async function popCandidatesFromDnsGuesses(domain: string): Promise<PopDiscoveryCandidate[]> {
@@ -514,12 +516,12 @@ function streamImapCandidates(
 		})
 		.finally(done);
 
-	void (async () => {
-		await new Promise((r) => setTimeout(r, DNS_GUESS_DELAY_MS));
-		if (abortSignal?.aborted) return;
-		const list = await imapCandidatesFromDnsGuesses(domain);
-		for (const c of list) enqueue(c);
-	})().finally(done);
+	void imapCandidatesFromDnsGuesses(domain)
+		.then((list) => {
+			if (abortSignal?.aborted) return;
+			for (const c of list) enqueue(c);
+		})
+		.finally(done);
 }
 
 function streamPopCandidates(
@@ -573,7 +575,11 @@ async function raceVerifyImapCandidates(
 ): Promise<{ candidate: ImapDiscoveryCandidate | null; folders?: ImapFolder[] }> {
 	const trimmedPassword = password?.trim();
 	const abort = new AbortController();
-	let winningFolders: ImapFolder[] | undefined;
+	let authenticated: {
+		candidate: ImapDiscoveryCandidate;
+		folders?: ImapFolder[];
+	} | null = null;
+	let authFailedCandidate: ImapDiscoveryCandidate | null = null;
 
 	const race = createStreamingRace<ImapDiscoveryCandidate>({
 		maxConcurrency: DISCOVERY_PROBE_CONCURRENCY,
@@ -594,7 +600,13 @@ async function raceVerifyImapCandidates(
 					},
 					{ listFolders: collectFolders },
 				);
-				if (result === "ok" && folders) winningFolders = folders;
+				if (result === "ok") {
+					authenticated = { candidate: c, folders };
+				} else if (result === "auth-failed") {
+					if (!authFailedCandidate || c.priority < authFailedCandidate.priority) {
+						authFailedCandidate = c;
+					}
+				}
 				return result;
 			}
 			const live = await probeImapBanner(
@@ -613,9 +625,16 @@ async function raceVerifyImapCandidates(
 		if (pendingSources === 0) race.close();
 	};
 	streamImapCandidates(domain, (c) => race.enqueue(c), onSourceDone, abort.signal);
-	const candidate = await race.wait();
+	const bannerCandidate = await race.wait();
 	abort.abort();
-	return { candidate, folders: winningFolders };
+
+	if (trimmedPassword) {
+		return {
+			candidate: authenticated?.candidate ?? authFailedCandidate,
+			folders: authenticated?.folders,
+		};
+	}
+	return { candidate: bannerCandidate, folders: undefined };
 }
 
 async function raceVerifyPopCandidates(
@@ -624,12 +643,13 @@ async function raceVerifyPopCandidates(
 	password: string,
 ): Promise<PopDiscoveryCandidate | null> {
 	const trimmedPassword = password.trim();
+	let authenticated: PopDiscoveryCandidate | null = null;
 	const race = createStreamingRace<PopDiscoveryCandidate>({
 		maxConcurrency: DISCOVERY_PROBE_CONCURRENCY,
 		budgetMs: DISCOVERY_BUDGET_MS,
 		candidateKey,
-		probe: async (c) =>
-			probePop3Login({
+		probe: async (c) => {
+			const result = await probePop3Login({
 				provider: "generic",
 				email,
 				host: c.host,
@@ -638,7 +658,10 @@ async function raceVerifyPopCandidates(
 				authMethod: "password",
 				password: trimmedPassword,
 				accessProtocol: "pop3",
-			}),
+			});
+			if (result === "ok") authenticated = c;
+			return result;
+		},
 	});
 
 	let pendingSources = 2;
@@ -647,7 +670,8 @@ async function raceVerifyPopCandidates(
 		if (pendingSources === 0) race.close();
 	};
 	streamPopCandidates(domain, (c) => race.enqueue(c), onSourceDone);
-	return race.wait();
+	await race.wait();
+	return authenticated;
 }
 
 /**
@@ -656,7 +680,7 @@ async function raceVerifyPopCandidates(
  */
 export async function discoverMailboxSettings(
 	email: string,
-	options?: { password?: string; collectFolders?: boolean },
+	options?: { password?: string; collectFolders?: boolean; imapOnly?: boolean },
 ): Promise<MailboxDiscoveryResult> {
 	const trimmed = email.trim();
 	const domain = emailDomain(trimmed);
@@ -666,6 +690,7 @@ export async function discoverMailboxSettings(
 
 	const password = options?.password?.trim();
 	const collectFolders = Boolean(options?.collectFolders && password);
+	const imapOnly = options?.imapOnly !== false;
 
 	const imapVerified = await raceVerifyImapCandidates(
 		trimmed,
@@ -677,7 +702,7 @@ export async function discoverMailboxSettings(
 		return imapResultFromCandidate(imapVerified.candidate, imapVerified.folders);
 	}
 
-	if (password) {
+	if (password && !imapOnly) {
 		const popVerified = await raceVerifyPopCandidates(trimmed, domain, password);
 		if (popVerified) {
 			return popResultFromCandidate(popVerified);

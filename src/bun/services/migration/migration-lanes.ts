@@ -8,7 +8,7 @@ import {
 } from "../imap/destination-message-index";
 import {
 	appendMessage,
-	createImapClient,
+	connectImapClient,
 	flagsToArray,
 	safeCloseImapClient,
 	type FetchedMigrationMessage,
@@ -110,7 +110,7 @@ async function transferMessage(
 	mapping: FolderMapping,
 	msg: FetchedMigrationMessage,
 	transfer: MigrationTransferConfig,
-	destClient: Awaited<ReturnType<typeof createImapClient>> | null,
+	destClient: Awaited<ReturnType<typeof connectImapClient>> | null,
 	destMessageIds: Set<string>,
 	duplicateLock: ReturnType<typeof createAsyncMutex>,
 	backupAccountDir: string | null,
@@ -227,9 +227,8 @@ async function runMigrationLane(options: {
 	} = options;
 
 	const sourceSession = await openMailSource(sourceCreds);
-	const destClient = backupOnly ? null : await createImapClient(destCreds);
+	const destClient = backupOnly ? null : await connectImapClient(destCreds);
 	try {
-		if (destClient) await destClient.connect();
 
 		let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
 		for (let i = 0; i < uids.length; i += MIGRATION_FETCH_BATCH_SIZE) {

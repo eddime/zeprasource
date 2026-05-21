@@ -42,7 +42,12 @@ export type ConnectMailboxResult = ConnectionTestResult & {
 	source: ImapDiscoverySource;
 };
 
-/** Streaming autodiscovery + connection test in one RPC round-trip. */
+/** IMAP credentials for listing/stats (migration requires folder tree, not POP3-only). */
+export function asImapCredentials(credentials: MailboxCredentials): MailboxCredentials {
+	return { ...credentials, accessProtocol: "imap" };
+}
+
+/** Streaming autodiscovery + full IMAP folder list (never POP3 for connect). */
 export async function connectMailbox(
 	email: string,
 	password: string,
@@ -51,26 +56,11 @@ export async function connectMailbox(
 	const trimmedPassword = password.trim();
 	const discovered = await discoverMailboxSettings(trimmedEmail, {
 		password: trimmedPassword,
-		collectFolders: true,
+		imapOnly: true,
+		collectFolders: false,
 	});
-	const settings = {
-		host: discovered.host,
-		port: discovered.port,
-		secure: discovered.secure,
-		provider: discovered.provider,
-		accessProtocol: discovered.accessProtocol,
-		source: discovered.source,
-	};
 
-	if (discovered.folders) {
-		return {
-			success: true,
-			folders: discovered.folders,
-			...settings,
-		};
-	}
-
-	const credentials: MailboxCredentials = {
+	const imapCredentials: MailboxCredentials = {
 		provider: discovered.provider,
 		email: trimmedEmail,
 		host: discovered.host,
@@ -78,9 +68,19 @@ export async function connectMailbox(
 		secure: discovered.secure,
 		authMethod: "password",
 		password: trimmedPassword,
-		accessProtocol: discovered.accessProtocol,
+		accessProtocol: "imap",
 	};
-	const connection = await testMailConnection(credentials);
+
+	const settings = {
+		host: discovered.host,
+		port: discovered.port,
+		secure: discovered.secure,
+		provider: discovered.provider,
+		accessProtocol: "imap" as const,
+		source: discovered.source,
+	};
+
+	const connection = await testImapConnection(imapCredentials);
 	return {
 		...connection,
 		...settings,
@@ -105,6 +105,14 @@ export async function measureMailFolderSizes(
 		);
 	}
 	return measureImapFolderSizes(credentials, folderPaths);
+}
+
+/** Measure folder sizes for migration setup (always IMAP on source). */
+export async function measureSourceFolderSizes(
+	source: MailboxCredentials,
+	folderPaths: string[],
+): Promise<FolderSizeEstimate[]> {
+	return measureImapFolderSizes(asImapCredentials(source), folderPaths);
 }
 
 export async function estimateMailMigrationSize(

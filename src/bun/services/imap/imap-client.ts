@@ -33,6 +33,57 @@ function attachImapErrorGuard(client: ImapFlow, host: string): void {
 	});
 }
 
+/** Shared hosting often presents a hoster cert for the customer's mail hostname. */
+export function isImapTlsHostnameMismatch(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const extra = error as Error & { code?: string };
+	const text = `${extra.code ?? ""} ${error.message}`;
+	return /Hostname\/IP does not match certificate|ERR_TLS_CERT_ALTNAME_INVALID|altnames/i.test(
+		text,
+	);
+}
+
+function shouldRetryImapWithRelaxedTls(
+	error: unknown,
+	relaxedTls: boolean,
+	credentials: MailboxCredentials,
+): boolean {
+	if (relaxedTls) return false;
+	if (isImapTlsHostnameMismatch(error)) return true;
+	// STARTTLS on 143: cert mismatch often surfaces as abrupt close, not a clear TLS message.
+	if (!credentials.secure && credentials.port === 143) {
+		const extra = error as Error & { code?: string };
+		return (
+			extra.code === "ClosedAfterConnectText" ||
+			/ECONNRESET|Unexpected close|closed/i.test(error.message)
+		);
+	}
+	return false;
+}
+
+export async function connectImapClient(
+	raw: MailboxCredentials,
+	mode: ImapClientMode = "migration",
+): Promise<ImapFlow> {
+	const credentials = normalizeMailboxCredentials(raw);
+	const attempts: boolean[] = credentials.relaxedTls ? [true] : [false, true];
+	let lastError: unknown;
+
+	for (const relaxedTls of attempts) {
+		const client = await createImapClient({ ...credentials, relaxedTls }, mode);
+		try {
+			await client.connect();
+			return client;
+		} catch (error) {
+			lastError = error;
+			await safeCloseImapClient(client);
+			if (!shouldRetryImapWithRelaxedTls(error, relaxedTls, credentials)) break;
+		}
+	}
+
+	throw lastError;
+}
+
 export async function safeCloseImapClient(client: ImapFlow): Promise<void> {
 	client.removeAllListeners("error");
 	try {
@@ -65,8 +116,9 @@ export async function createImapClient(
 		logger: false,
 		...timeouts,
 		tls: {
-			rejectUnauthorized: true,
+			rejectUnauthorized: !credentials.relaxedTls,
 			minVersion: "TLSv1.2",
+			servername: credentials.host,
 		},
 		emitLogs: false,
 	});
@@ -84,9 +136,8 @@ export async function testImapConnection(
 		return { success: false, error: validationError };
 	}
 
-	const client = await createImapClient(credentials, "test");
+	const client = await connectImapClient(credentials, "test");
 	try {
-		await client.connect();
 		const mailboxes = await client.list();
 		const folders: ImapFolder[] = mailboxes
 			.filter((box) => !box.flags?.has("\\Noselect"))
@@ -246,11 +297,10 @@ export async function measureFolderSizes(
 	folderPaths: string[],
 ): Promise<FolderSizeEstimate[]> {
 	const normalized = normalizeMailboxCredentials(credentials);
-	const client = await createImapClient(normalized, "test");
+	const client = await connectImapClient(normalized, "test");
 	const folders: FolderSizeEstimate[] = [];
 
 	try {
-		await client.connect();
 		for (const folderPath of folderPaths) {
 			const lock = await client.getMailboxLock(folderPath);
 			try {

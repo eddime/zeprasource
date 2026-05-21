@@ -6,7 +6,7 @@ import { classifyMigrationError } from "./migration-errors";
 import { transferFolderWithLanes, type FolderTransferHooks } from "./migration-lanes";
 import type { MigrationTransferConfig } from "./migration-autopilot";
 import { describeFinishingRemainingActivity } from "./migration-autopilot";
-import type { createImapClient } from "../imap/imap-client";
+import type { connectImapClient } from "../imap/imap-client";
 
 export const MAX_FAILURE_SWEEPS = 15;
 import { FAILURE_SWEEP_BASE_DELAY_MS } from "./migration-constants";
@@ -54,7 +54,7 @@ export async function sweepFailedMessages(options: {
 	mappings: FolderMapping[];
 	source: MailboxCredentials;
 	destination: MailboxCredentials;
-	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
+	destClient: Awaited<ReturnType<typeof connectImapClient>> | null;
 	transfer: MigrationTransferConfig;
 	backupRootPath: string | null;
 	backupOnly: boolean;

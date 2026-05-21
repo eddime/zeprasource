@@ -23,6 +23,7 @@ import {
 	connectMailbox,
 	estimateMailMigrationSize,
 	measureMailFolderSizes,
+	measureSourceFolderSizes,
 	testMailConnection,
 } from "../services/mail/mail-connection";
 import { checkDestinationQuota } from "../services/imap/destination-quota";
@@ -120,7 +121,7 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 				estimateMailMigrationSize(source, folderPaths, destination),
 
 			fetchFolderStats: async ({ source, folderPaths }) =>
-				measureMailFolderSizes(source, folderPaths),
+				measureSourceFolderSizes(source, folderPaths),
 
 			checkDestinationQuota: async ({ destination, requiredBytes, requiredMessages }) => {
 				return checkDestinationQuota(destination, {

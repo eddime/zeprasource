@@ -2,7 +2,7 @@ import { connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import type { ImapFlow } from "imapflow";
 import type { ImapFolder, MailboxCredentials } from "../../../shared/types";
-import { createImapClient, safeCloseImapClient } from "./imap-client";
+import { connectImapClient, safeCloseImapClient } from "./imap-client";
 
 export type ImapLoginProbeResult = "ok" | "auth-failed" | "network";
 
@@ -112,13 +112,12 @@ export async function probeImapLoginDetailed(
 	const pass = credentials.password ?? "";
 	if (!user || !pass) return { result: "network" };
 
-	const client = await createImapClient(
-		{ ...credentials, email: user, password: pass, authMethod: "password" },
-		"probe",
-	);
-
+	let client: Awaited<ReturnType<typeof connectImapClient>> | null = null;
 	try {
-		await client.connect();
+		client = await connectImapClient(
+			{ ...credentials, email: user, password: pass, authMethod: "password" },
+			"probe",
+		);
 		const folders = options?.listFolders
 			? await listImapFoldersAfterConnect(client)
 			: undefined;
@@ -128,7 +127,7 @@ export async function probeImapLoginDetailed(
 		if (isAuthFailure(error)) return { result: "auth-failed" };
 		return { result: "network" };
 	} finally {
-		await safeCloseImapClient(client);
+		if (client) await safeCloseImapClient(client);
 	}
 }
 

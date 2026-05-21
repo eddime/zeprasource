@@ -3,7 +3,7 @@ import {
 	evaluateDestinationQuota,
 	type DestinationQuotaCheck,
 } from "../../../shared/destination-quota";
-import { createImapClient, safeCloseImapClient } from "./imap-client";
+import { connectImapClient, safeCloseImapClient } from "./imap-client";
 import { formatImapError, normalizeMailboxCredentials } from "./credentials";
 
 export async function checkDestinationQuota(
@@ -11,10 +11,9 @@ export async function checkDestinationQuota(
 	required: { bytes: number; messages: number },
 ): Promise<DestinationQuotaCheck> {
 	const credentials = normalizeMailboxCredentials(destination);
-	const client = await createImapClient(credentials, "test");
+	const client = await connectImapClient(credentials, "test");
 
 	try {
-		await client.connect();
 		const quota = await client.getQuota("INBOX");
 		if (quota === false) {
 			return evaluateDestinationQuota({}, required);

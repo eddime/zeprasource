@@ -109,7 +109,7 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 					creds.port = connected.port;
 					creds.secure = connected.secure;
 					creds.provider = connected.provider;
-					creds.accessProtocol = connected.accessProtocol;
+					creds.accessProtocol = "imap";
 					if (isSource) source.value = { ...creds };
 					else destination.value = { ...creds };
 
@@ -130,6 +130,12 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 						destFolders.value = connected.folders ?? [];
 					}
 					buildFolderMappings();
+					if (folderMappings.value.length === 0) {
+						const msg = "Connected but no folders were found on this mailbox.";
+						if (isSource) sourceTestError.value = msg;
+						else destTestError.value = msg;
+						return false;
+					}
 					await rpc.request.saveMailboxProfile({ role: target, credentials: creds });
 					// Validated after credentials are on the model (avoids MailboxCard treating discovery as user edit).
 					await nextTick();
@@ -252,8 +258,32 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 		});
 	}
 
+	async function reloadSourceFolders(): Promise<boolean> {
+		if (!sourceValidated.value) return false;
+		try {
+			const rpc = getRpc();
+			const creds: MailboxCredentials = {
+				...source.value,
+				authMethod: "password",
+				accessProtocol: "imap",
+			};
+			const result = await rpc.request.testConnection({ credentials: creds });
+			if (!result.success || !result.folders?.length) return false;
+			source.value = { ...creds };
+			sourceFolders.value = result.folders;
+			buildFolderMappings();
+			return true;
+		} catch {
+			return false;
+		}
+	}
+
 	async function loadFolderStats(force = false) {
-		if (!sourceValidated.value || folderMappings.value.length === 0) return;
+		if (!sourceValidated.value) return;
+		if (folderMappings.value.length === 0) {
+			const loaded = await reloadSourceFolders();
+			if (!loaded) return;
+		}
 		if (
 			!force &&
 			folderMappings.value.every((m) => m.messages !== undefined && m.bytes !== undefined)
