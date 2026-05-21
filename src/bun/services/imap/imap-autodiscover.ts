@@ -4,12 +4,14 @@ import {
 	detectProviderFromEmail,
 	emailDomain,
 } from "../../../shared/mailbox-provider";
+import type { MailAccessProtocol } from "../../../shared/mail-access";
 import type { MailboxProvider } from "../../../shared/types";
 import { PROVIDER_PRESETS } from "../../../shared/types";
 import { resolveOutlookHost } from "./credentials";
 
 export { detectProviderFromEmail } from "../../../shared/mailbox-provider";
 import { pickVerifiedCandidate } from "./imap-probe";
+import { pickVerifiedPopCandidate } from "../pop/pop-probe";
 
 /** Discovery fetches — kept short; wrong hosts fail fast in parallel probes. */
 const AUTOCONFIG_FETCH_MS = 4_000;
@@ -34,7 +36,23 @@ export interface ImapDiscoveryResult {
 	verified: boolean;
 }
 
+export interface MailboxDiscoveryResult extends ImapDiscoveryResult {
+	accessProtocol: MailAccessProtocol;
+}
+
 interface ImapDiscoveryCandidate extends ImapDiscoveryResult {
+	priority: number;
+}
+
+type PopDiscoverySource = ImapDiscoverySource;
+
+interface PopDiscoveryCandidate {
+	host: string;
+	port: number;
+	secure: boolean;
+	provider: MailboxProvider;
+	source: PopDiscoverySource;
+	verified: boolean;
 	priority: number;
 }
 
@@ -192,45 +210,95 @@ async function readMailSubdomainCert(domain: string): Promise<string | null> {
 	});
 }
 
+function parseIncomingServerBlock(
+	xml: string,
+	type: "imap" | "pop3",
+	source: ImapDiscoverySource,
+): Omit<ImapDiscoveryResult, "provider" | "verified"> | null {
+	const blockMatch = xml.match(
+		new RegExp(
+			`<incomingServer[^>]*type\\s*=\\s*["']${type}["'][^>]*>([\\s\\S]*?)<\\/incomingServer>`,
+			"i",
+		),
+	);
+	if (!blockMatch) return null;
+
+	const block = blockMatch[1];
+	const host = block.match(/<hostname>([^<]+)<\/hostname>/i)?.[1]?.trim();
+	if (!host) return null;
+
+	const defaultPort = type === "imap" ? 993 : 995;
+	const port = Number.parseInt(
+		block.match(/<port>([^<]+)<\/port>/i)?.[1] ?? String(defaultPort),
+		10,
+	);
+	const socket = block.match(/<socketType>([^<]+)<\/socketType>/i)?.[1]?.trim().toUpperCase();
+	const sslDefault = type === "imap" ? 993 : 995;
+	const plainDefault = type === "imap" ? 143 : 110;
+	const secure =
+		socket === "SSL" ||
+		(socket !== "STARTTLS" && socket !== "PLAIN" && port === sslDefault);
+
+	return {
+		host,
+		port:
+			Number.isFinite(port) && port > 0
+				? port
+				: secure
+					? sslDefault
+					: plainDefault,
+		secure: secure && port !== plainDefault,
+		source,
+	};
+}
+
 function parseMozillaAutoconfig(
 	xml: string,
 	source: ImapDiscoverySource,
 ): Omit<ImapDiscoveryResult, "provider" | "verified"> | null {
-	const imapBlock = xml.match(
-		/<incomingServer[^>]*type\s*=\s*["']imap["'][^>]*>([\s\S]*?)<\/incomingServer>/i,
-	);
-	if (!imapBlock) return null;
+	return parseIncomingServerBlock(xml, "imap", source);
+}
 
-	const block = imapBlock[1];
-	const host = block.match(/<hostname>([^<]+)<\/hostname>/i)?.[1]?.trim();
-	if (!host) return null;
+function parseMozillaAutoconfigPop3(
+	xml: string,
+	source: PopDiscoverySource,
+): Omit<PopDiscoveryCandidate, "provider" | "verified" | "priority"> | null {
+	return parseIncomingServerBlock(xml, "pop3", source);
+}
 
-	const port = Number.parseInt(block.match(/<port>([^<]+)<\/port>/i)?.[1] ?? "993", 10);
-	const socket = block.match(/<socketType>([^<]+)<\/socketType>/i)?.[1]?.trim().toUpperCase();
-	const secure = socket !== "STARTTLS" && socket !== "PLAIN" && port !== 143;
-
-	return {
-		host,
-		port: Number.isFinite(port) && port > 0 ? port : secure ? 993 : 143,
-		secure: secure && port !== 143,
-		source,
-	};
+async function fetchAutoconfigXml(domain: string, url: string): Promise<string | null> {
+	try {
+		const res = await fetch(url, {
+			signal: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
+			headers: { Accept: "application/xml,text/xml" },
+		});
+		if (!res.ok) return null;
+		return await res.text();
+	} catch {
+		return null;
+	}
 }
 
 async function fetchThunderbirdAutoconfig(
 	domain: string,
 ): Promise<Omit<ImapDiscoveryResult, "provider" | "verified"> | null> {
-	try {
-		const res = await fetch(`https://autoconfig.thunderbird.net/v1.1/${domain}`, {
-			signal: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
-			headers: { Accept: "application/xml,text/xml" },
-		});
-		if (!res.ok) return null;
-		const xml = await res.text();
-		return parseMozillaAutoconfig(xml, "thunderbird");
-	} catch {
-		return null;
-	}
+	const xml = await fetchAutoconfigXml(
+		domain,
+		`https://autoconfig.thunderbird.net/v1.1/${domain}`,
+	);
+	if (!xml) return null;
+	return parseMozillaAutoconfig(xml, "thunderbird");
+}
+
+async function fetchThunderbirdAutoconfigPop3(
+	domain: string,
+): Promise<Omit<PopDiscoveryCandidate, "provider" | "verified" | "priority"> | null> {
+	const xml = await fetchAutoconfigXml(
+		domain,
+		`https://autoconfig.thunderbird.net/v1.1/${domain}`,
+	);
+	if (!xml) return null;
+	return parseMozillaAutoconfigPop3(xml, "thunderbird");
 }
 
 async function fetchDomainAutoconfig(
@@ -242,22 +310,31 @@ async function fetchDomainAutoconfig(
 		`https://mail.${domain}/mail/config-v1.1.xml`,
 	];
 
-	const fetches = await Promise.all(
-		urls.map(async (url) => {
-			try {
-				const res = await fetch(url, {
-					signal: AbortSignal.timeout(AUTOCONFIG_FETCH_MS),
-					headers: { Accept: "application/xml,text/xml" },
-				});
-				if (!res.ok) return null;
-				const xml = await res.text();
-				return parseMozillaAutoconfig(xml, "autoconfig");
-			} catch {
-				return null;
-			}
-		}),
-	);
-	return fetches.find((parsed) => parsed !== null) ?? null;
+	for (const url of urls) {
+		const xml = await fetchAutoconfigXml(domain, url);
+		if (!xml) continue;
+		const parsed = parseMozillaAutoconfig(xml, "autoconfig");
+		if (parsed) return parsed;
+	}
+	return null;
+}
+
+async function fetchDomainAutoconfigPop3(
+	domain: string,
+): Promise<Omit<PopDiscoveryCandidate, "provider" | "verified" | "priority"> | null> {
+	const urls = [
+		`https://autoconfig.${domain}/mail/config-v1.1.xml`,
+		`https://${domain}/.well-known/autoconfig/mail/config-v1.1.xml`,
+		`https://mail.${domain}/mail/config-v1.1.xml`,
+	];
+
+	for (const url of urls) {
+		const xml = await fetchAutoconfigXml(domain, url);
+		if (!xml) continue;
+		const parsed = parseMozillaAutoconfigPop3(xml, "autoconfig");
+		if (parsed) return parsed;
+	}
+	return null;
 }
 
 async function resolveMxHosts(domain: string): Promise<string[]> {
@@ -398,6 +475,24 @@ async function candidatesFromSrv(domain: string): Promise<ImapDiscoveryCandidate
 	return results.filter((c): c is ImapDiscoveryCandidate => c !== null);
 }
 
+async function candidatesFromPopDnsGuesses(domain: string): Promise<PopDiscoveryCandidate[]> {
+	const hosts = [`pop.${domain}`, `pop3.${domain}`, `mail.${domain}`] as const;
+	const checks = await Promise.all(
+		hosts.map(async (host) => ({ host, ok: await hostResolves(host) })),
+	);
+	return checks
+		.filter((c) => c.ok)
+		.map(({ host }) => ({
+			host,
+			port: host.startsWith("pop") ? 995 : 110,
+			secure: host.startsWith("pop"),
+			provider: "generic" as const,
+			source: "guess" as const,
+			verified: false,
+			priority: host.startsWith("pop3.") ? 42 : host.startsWith("pop.") ? 40 : 48,
+		}));
+}
+
 async function candidatesFromDnsGuesses(domain: string): Promise<ImapDiscoveryCandidate[]> {
 	const hosts = [`imap.${domain}`, `mail.${domain}`] as const;
 	const checks = await Promise.all(
@@ -473,14 +568,76 @@ async function collectImapCandidates(
 	return dedupeCandidates(list);
 }
 
+function dedupePopCandidates(candidates: PopDiscoveryCandidate[]): PopDiscoveryCandidate[] {
+	const byKey = new Map<string, PopDiscoveryCandidate>();
+	for (const c of candidates) {
+		const key = `${c.host}:${c.port}:${c.secure}`;
+		const existing = byKey.get(key);
+		if (!existing || c.priority < existing.priority) {
+			byKey.set(key, c);
+		}
+	}
+	return [...byKey.values()].sort((a, b) => a.priority - b.priority);
+}
+
+async function collectPopCandidates(
+	email: string,
+	domain: string,
+): Promise<PopDiscoveryCandidate[]> {
+	const trimmed = email.trim();
+	const known = detectProviderFromEmail(trimmed);
+	if (known) return [];
+
+	const list: PopDiscoveryCandidate[] = [];
+	const [thunderbird, autoconfig, guesses] = await Promise.all([
+		fetchThunderbirdAutoconfigPop3(domain),
+		fetchDomainAutoconfigPop3(domain),
+		candidatesFromPopDnsGuesses(domain),
+	]);
+
+	if (thunderbird) {
+		list.push({
+			...thunderbird,
+			provider: "generic",
+			verified: false,
+			priority: 5,
+		});
+	}
+	if (autoconfig) {
+		list.push({
+			...autoconfig,
+			provider: "generic",
+			verified: false,
+			priority: 8,
+		});
+	}
+	list.push(...guesses);
+	return dedupePopCandidates(list);
+}
+
+function imapResultFromCandidate(
+	candidate: ImapDiscoveryCandidate,
+): MailboxDiscoveryResult {
+	const { priority: _p, ...result } = candidate;
+	return { ...result, verified: true, accessProtocol: "imap" };
+}
+
+function popResultFromCandidate(candidate: PopDiscoveryCandidate): MailboxDiscoveryResult {
+	const { priority: _p, ...rest } = candidate;
+	return {
+		...rest,
+		verified: true,
+		accessProtocol: "pop3",
+	};
+}
+
 /**
- * Discover IMAP settings by gathering candidates from DNS, MX, Mozilla autoconfig,
- * and hosting signals — then **proving** the server speaks IMAP (banner or login).
+ * Discover mail settings (IMAP preferred, POP3 fallback) — proven with banner or login.
  */
-export async function discoverImapSettings(
+export async function discoverMailboxSettings(
 	email: string,
 	options?: { password?: string },
-): Promise<ImapDiscoveryResult> {
+): Promise<MailboxDiscoveryResult> {
 	const trimmed = email.trim();
 	const domain = emailDomain(trimmed);
 	if (!domain) {
@@ -491,7 +648,7 @@ export async function discoverImapSettings(
 	const password = options?.password?.trim();
 
 	if (known && !password) {
-		return presetForProvider(known, trimmed);
+		return { ...presetForProvider(known, trimmed), accessProtocol: "imap" };
 	}
 
 	if (known && password) {
@@ -513,44 +670,72 @@ export async function discoverImapSettings(
 				secure: c.secure,
 				authMethod: "password",
 				password,
+				accessProtocol: "imap",
 			}),
 		});
 		if (presetVerified) {
-			const { priority: _p, ...result } = presetVerified;
-			return { ...result, verified: true };
+			return imapResultFromCandidate(presetVerified);
 		}
 	}
 
-	const candidates = await collectImapCandidates(trimmed, domain);
-	if (candidates.length === 0) {
-		throw new Error(
-			`Could not find an IMAP server for ${domain}. Open “Show server settings” and enter the host from your email provider.`,
-		);
+	const imapCandidates = await collectImapCandidates(trimmed, domain);
+	if (imapCandidates.length > 0) {
+		const imapVerified = await pickVerifiedCandidate(imapCandidates, {
+			email: trimmed,
+			password,
+			bannerTimeoutMs: DISCOVERY_BANNER_PROBE_MS,
+			toCredentials: (c) => ({
+				provider: c.provider,
+				email: trimmed,
+				host: c.host,
+				port: c.port,
+				secure: c.secure,
+				authMethod: "password",
+				password,
+				accessProtocol: "imap",
+			}),
+		});
+		if (imapVerified) {
+			return imapResultFromCandidate(imapVerified);
+		}
 	}
 
-	const verified = await pickVerifiedCandidate(candidates, {
-		email: trimmed,
-		password,
-		bannerTimeoutMs: DISCOVERY_BANNER_PROBE_MS,
-		toCredentials: (c) => ({
-			provider: c.provider,
+	const popCandidates = await collectPopCandidates(trimmed, domain);
+	if (popCandidates.length > 0 && password) {
+		const popVerified = await pickVerifiedPopCandidate(popCandidates, {
 			email: trimmed,
-			host: c.host,
-			port: c.port,
-			secure: c.secure,
-			authMethod: "password",
 			password,
-		}),
-	});
-
-	if (verified) {
-		const { priority: _p, ...result } = verified;
-		return { ...result, verified: true };
+			bannerTimeoutMs: DISCOVERY_BANNER_PROBE_MS,
+			toCredentials: (c) => ({
+				provider: c.provider,
+				email: trimmed,
+				host: c.host,
+				port: c.port,
+				secure: c.secure,
+				authMethod: "password",
+				password,
+				accessProtocol: "pop3",
+			}),
+		});
+		if (popVerified) {
+			return popResultFromCandidate(popVerified);
+		}
 	}
 
 	throw new Error(
 		password
-			? `No working IMAP server found for ${domain}. Check your password or enter the server manually under “Show server settings”.`
-			: `Could not verify an IMAP server for ${domain}. Enter your password and try again, or set the server manually.`,
+			? `No working mail server found for ${domain}. Check your password or enter the server manually under “Show server settings”.`
+			: `Could not verify a mail server for ${domain}. Enter your password and try again, or set the server manually.`,
 	);
+}
+
+/**
+ * Discover IMAP settings by gathering candidates from DNS, MX, Mozilla autoconfig,
+ * and hosting signals — then **proving** the server speaks IMAP (banner or login).
+ */
+export async function discoverImapSettings(
+	email: string,
+	options?: { password?: string },
+): Promise<MailboxDiscoveryResult> {
+	return discoverMailboxSettings(email, options);
 }

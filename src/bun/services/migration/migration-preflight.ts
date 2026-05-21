@@ -9,9 +9,9 @@ import {
 	folderMappingsToSizeEstimates,
 } from "../../../shared/migration-size-estimate";
 import {
-	estimateMigrationSize,
-	testImapConnection,
-} from "../imap/imap-client";
+	estimateMailMigrationSize,
+	testMailConnection,
+} from "../mail/mail-connection";
 import { getMigrationPricingCatalog } from "../stripe/migration-pricing-catalog";
 import {
 	assertMigrationResumeLicense,
@@ -54,7 +54,7 @@ async function assertMailboxReachable(
 	role: "source" | "destination",
 	credentials: MailboxCredentials,
 ): Promise<void> {
-	const result = await testImapConnection(credentials);
+	const result = await testMailConnection(credentials);
 	if (result.success) return;
 	const label = role === "source" ? "source mailbox" : "destination mailbox";
 	throw new Error(
@@ -130,7 +130,7 @@ export async function runMigrationPreflight(
 							: 0,
 					},
 				})
-			: await estimateMigrationSize(source, folderPaths, destination);
+			: await estimateMailMigrationSize(source, folderPaths, destination);
 	const quota = await checkDestinationQuota(destination, {
 		bytes: estimate.totalBytes,
 		messages: estimate.messageCount,

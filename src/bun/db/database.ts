@@ -147,6 +147,16 @@ function applySchemaMigrations(database: Database): void {
 	if (!names.has("job_type")) {
 		addColumn("ALTER TABLE migrations ADD COLUMN job_type TEXT NOT NULL DEFAULT 'migrate'");
 	}
+
+	const profileColumns = database
+		.query("PRAGMA table_info(mailbox_profiles)")
+		.all() as Array<{ name: string }>;
+	const profileNames = new Set(profileColumns.map((c) => c.name));
+	if (!profileNames.has("access_protocol")) {
+		addColumn(
+			"ALTER TABLE mailbox_profiles ADD COLUMN access_protocol TEXT NOT NULL DEFAULT 'imap'",
+		);
+	}
 }
 
 let db: Database | null = null;

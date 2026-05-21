@@ -22,8 +22,9 @@ Required env vars: see [`.env.example`](./.env.example).
 | `POST` | `/v1/checkout/lifetime-sessions` | optional | Create Lifetime Checkout (249 €) |
 | `GET` | `/v1/checkout/lifetime-sessions/:id` | optional | Poll → `lifetimeLicense` (`zepra_lt.…`) |
 | `POST` | `/v1/lifetime/verify` | optional | Verify signed lifetime license + Stripe session |
-| `POST` | `/v1/checkout/sessions` | optional `X-Zepra-Api-Key` | Create Checkout Session |
-| `GET` | `/v1/checkout/sessions/:sessionId` | optional | Poll until `paid` + `launchTicket` |
+| `POST` | `/v1/checkout/sessions` | optional `X-Zepra-Api-Key` | Create Checkout Session (optional Lifetime add-on via Stripe `optional_items`) |
+| `GET` | `/v1/checkout/sessions/:sessionId` | optional | Poll until `paid` + `launchTicket` (+ `lifetimeLicense` if add-on purchased) |
+| `POST` | `/v1/checkout/sessions/:sessionId/lifetime-fulfillment` | optional | Issue Lifetime license from a paid migration checkout when the add-on was selected |
 | `POST` | `/v1/licenses/verify` | optional | Verify ticket + folder binding |
 | `POST` | `/v1/webhooks/stripe` | Stripe signature | `checkout.session.completed` → issue ticket |
 

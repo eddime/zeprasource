@@ -15,18 +15,18 @@ import {
 	loadMailboxProfileForDisplay,
 	saveMailboxProfile,
 } from "../services/imap/mailbox-profile";
-import { discoverImapSettings as lookupImapSettings } from "../services/imap/imap-autodiscover";
+import { discoverMailboxSettings as lookupMailboxSettings } from "../services/imap/imap-autodiscover";
+import {
+	estimateMailMigrationSize,
+	measureMailFolderSizes,
+	testMailConnection,
+} from "../services/mail/mail-connection";
 import { checkDestinationQuota } from "../services/imap/destination-quota";
 import {
 	checkBackupDiskSpace,
 	defaultBackupParentDir,
 	pickBackupDirectoryNative,
 } from "../services/backup/backup-disk";
-import {
-	estimateMigrationSize as computeMigrationSize,
-	measureFolderSizes,
-	testImapConnection,
-} from "../services/imap/imap-client";
 import type { FolderMapping } from "../../shared/types";
 import {
 	checkLocalTestServers,
@@ -87,15 +87,13 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 	maxRequestTime: 300_000,
 	handlers: {
 		requests: {
-			testConnection: async ({ credentials }) => {
-				return testImapConnection(credentials);
-			},
+			testConnection: async ({ credentials }) => testMailConnection(credentials),
 
 			discoverImapSettings: async ({ email, password }) =>
-				lookupImapSettings(email, { password }),
+				lookupMailboxSettings(email, { password }),
 
 			listFolders: async ({ credentials }) => {
-				const result = await testImapConnection(credentials);
+				const result = await testMailConnection(credentials);
 				return result.folders ?? [];
 			},
 
@@ -110,13 +108,11 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 				return { success: true as const };
 			},
 
-			estimateMigrationSize: async ({ source, folderPaths, destination }) => {
-				return computeMigrationSize(source, folderPaths, destination);
-			},
+			estimateMigrationSize: async ({ source, folderPaths, destination }) =>
+				estimateMailMigrationSize(source, folderPaths, destination),
 
-			fetchFolderStats: async ({ source, folderPaths }) => {
-				return measureFolderSizes(source, folderPaths);
-			},
+			fetchFolderStats: async ({ source, folderPaths }) =>
+				measureMailFolderSizes(source, folderPaths),
 
 			checkDestinationQuota: async ({ destination, requiredBytes, requiredMessages }) => {
 				return checkDestinationQuota(destination, {
@@ -157,7 +153,7 @@ export const mailportRpc = BrowserView.defineRPC<MailPortRPC>({
 						.filter((m: FolderMapping) => m.selected)
 						.map((m: FolderMapping) => m.sourcePath);
 					if (folderPaths.length > 0) {
-						const estimate = await computeMigrationSize(
+						const estimate = await estimateMailMigrationSize(
 							params.source,
 							folderPaths,
 							params.destination,

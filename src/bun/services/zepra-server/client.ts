@@ -112,3 +112,12 @@ export async function verifyLifetimeOnServer(
 		body: JSON.stringify({ lifetimeLicense }),
 	});
 }
+
+export async function fulfillLifetimeAddonOnServer(
+	sessionId: string,
+): Promise<{ issued: true; lifetimeLicense: string } | { issued: false }> {
+	return zepraServerFetch(
+		`/v1/checkout/sessions/${encodeURIComponent(sessionId)}/lifetime-fulfillment`,
+		{ method: "POST", body: "{}" },
+	);
+}

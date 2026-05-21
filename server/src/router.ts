@@ -18,14 +18,19 @@ import type { MigrationCheckoutCreateBody } from "./shared/stripe-checkout";
 import type { LicenseVerifyBody } from "./services/license-verify";
 import {
 	createLifetimeCheckoutSession,
+	fulfillLifetimeAddonFromSessionId,
 	getLifetimeCheckoutStatus,
 	handleLifetimeCheckoutWebhook,
+	issueLifetimeFromStripeSession,
 } from "./services/lifetime-checkout";
 import type { LifetimeVerifyBody } from "./services/lifetime-verify";
 import { verifyLifetimeLicense } from "./services/lifetime-verify";
 import { getZepraPricingCatalog } from "./services/zepra-pricing-catalog";
 import { createStripeClient } from "./stripe-client";
-import { STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME } from "./shared/stripe-checkout";
+import {
+	STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME,
+	STRIPE_CHECKOUT_PRICING_MODEL_PER_GB,
+} from "./shared/stripe-checkout";
 
 export async function handleRequest(req: Request): Promise<Response> {
 	const preflight = corsPreflight(req);
@@ -82,6 +87,26 @@ export async function handleRequest(req: Request): Promise<Response> {
 			}
 			const status = await getCheckoutStatus(sessionId);
 			return withCors(jsonResponse(status));
+		}
+
+		if (
+			req.method === "POST" &&
+			path.startsWith("/v1/checkout/sessions/") &&
+			path.endsWith("/lifetime-fulfillment")
+		) {
+			if (!isStripeConfigured()) {
+				return withCors(
+					errorResponse("Stripe is not configured on the server.", 503),
+				);
+			}
+			const sessionId = decodeURIComponent(
+				path.slice("/v1/checkout/sessions/".length, -"/lifetime-fulfillment".length),
+			);
+			if (!sessionId.startsWith("cs_")) {
+				return withCors(errorResponse("Invalid checkout session id."));
+			}
+			const result = await fulfillLifetimeAddonFromSessionId(sessionId);
+			return withCors(jsonResponse(result));
 		}
 
 		if (req.method === "POST" && path === "/v1/licenses/verify") {
@@ -158,8 +183,11 @@ async function handleStripeWebhook(req: Request): Promise<Response> {
 			session.metadata?.pricing_model === STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME
 		) {
 			await handleLifetimeCheckoutWebhook(session);
-		} else {
+		} else if (
+			session.metadata?.pricing_model === STRIPE_CHECKOUT_PRICING_MODEL_PER_GB
+		) {
 			await handleCheckoutCompletedWebhook(session);
+			await issueLifetimeFromStripeSession(session);
 		}
 	}
 

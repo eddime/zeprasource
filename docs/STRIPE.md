@@ -57,6 +57,7 @@ Checkout uses **card** only by default. Enable **PayPal** in Dashboard → **Set
 - **License:** Server signs `zepra_lt.<payload>.<hmac>` with `ZEPRA_LICENSE_SIGNING_SECRET` — the desktop app cannot forge this.
 - **Registry:** Server stores issued licenses in `server/data/lifetime-entitlements.json`.
 - **Desktop:** requires `ZEPRA_SERVER_URL` in `mailport/.env`; purchases and verification go through the server API.
+- **Migration upsell:** When the server and Lifetime price are configured, migration Checkout Sessions include a Stripe **`optional_items`** entry for Lifetime. Customers can add it in Hosted Checkout (same payment as the per-GB line). The server issues the Lifetime license from the same `cs_…` session (`POST /v1/checkout/sessions/:id/lifetime-fulfillment` or webhook).
 
 See [server/README.md](../server/README.md) for endpoints.
 

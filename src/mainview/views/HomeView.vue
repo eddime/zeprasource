@@ -502,6 +502,10 @@ async function confirmPricingAndMigrate() {
 			throw new Error(payment.error ?? "payment_failed");
 		}
 
+		if (payment.lifetimeLicense) {
+			await pricing.refreshEntitlement(true);
+		}
+
 		const backupRootPath = await resolveBackupRootForStart(sizeEstimate.value);
 
 		await migration.start(undefined, {
@@ -599,7 +603,6 @@ async function startAnotherMigration() {
 					:payment-error="pricingPaymentError"
 					@back="backFromPricing"
 					@continue="confirmPricingAndMigrate"
-					@lifetime="confirmLifetimeAndMigrate"
 				/>
 
 				<div v-else key="s" class="setup step-view">

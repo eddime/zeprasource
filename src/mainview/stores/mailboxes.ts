@@ -109,6 +109,7 @@ export const useMailboxesStore = defineStore("mailboxes", () => {
 					creds.port = discovered.port;
 					creds.secure = discovered.secure;
 					creds.provider = discovered.provider;
+					creds.accessProtocol = discovered.accessProtocol;
 					if (isSource) source.value = { ...creds };
 					else destination.value = { ...creds };
 				} catch (error) {

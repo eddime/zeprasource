@@ -66,8 +66,12 @@ import {
 	createImapClient,
 	safeCloseImapClient,
 	ensureFolderExists,
-	fetchFolderUids,
 } from "../imap/imap-client";
+import {
+	closeMailSource,
+	fetchSourceFolderUids,
+	openMailSource,
+} from "../mail/mail-source";
 import { transferFolderWithLanes } from "./migration-lanes";
 import type { MigrationErrorClassification } from "./migration-errors";
 import { logger } from "../../utils/logger";
@@ -335,11 +339,10 @@ export async function executeMigration(
 		await verifyMigrationMailboxes(source, destination);
 	}
 
-	const sourceClient = await createImapClient(source);
+	const sourceSession = await openMailSource(source);
 	const destClient = backupOnly ? null : await createImapClient(destination);
 
 	try {
-		await sourceClient.connect();
 		if (destClient) await destClient.connect();
 
 		syncMigrationCounters(migrationId);
@@ -515,7 +518,7 @@ export async function executeMigration(
 				mapping.sourcePath,
 			);
 
-			const uids = await fetchFolderUids(sourceClient, mapping.sourcePath);
+			const uids = await fetchSourceFolderUids(sourceSession, mapping.sourcePath);
 			live.messagesTotal = updateFolderScannedTotal(
 				migrationId,
 				mapping.sourcePath,
@@ -732,7 +735,7 @@ export async function executeMigration(
 	} finally {
 		activeMigrations.delete(migrationId);
 		activeMigrationSlots.delete(migrationId);
-		await safeCloseImapClient(sourceClient);
+		await closeMailSource(sourceSession);
 		if (destClient) await safeCloseImapClient(destClient);
 	}
 }

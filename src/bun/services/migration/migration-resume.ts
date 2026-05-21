@@ -22,6 +22,7 @@ function serializeMailbox(credentials: MailboxCredentials): string {
 		port: credentials.port,
 		secure: credentials.secure,
 		authMethod: credentials.authMethod,
+		accessProtocol: credentials.accessProtocol,
 		username: credentials.username,
 		password: credentials.password,
 	});

@@ -1,6 +1,7 @@
 import Stripe from "stripe";
 import {
 	MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES,
+	STRIPE_CHECKOUT_PRICING_MODEL_PER_GB,
 	type MigrationCheckoutCreateParams,
 	type MigrationCheckoutCreateResult,
 	type MigrationCheckoutWaitResult,
@@ -22,6 +23,9 @@ import {
 	removeCheckoutSession,
 } from "./checkout-registry";
 import { getMigrationPricingCatalog } from "./migration-pricing-catalog";
+import { buildMigrationLifetimeOptionalItems } from "./migration-checkout-optional";
+import { saveLifetimeLicense } from "../lifetime/lifetime-entitlement";
+import { fulfillLifetimeAddonOnServer } from "../zepra-server/client";
 
 const POLL_INTERVAL_MS = 1500;
 const WAIT_TIMEOUT_MS = 10 * 60 * 1000;
@@ -62,15 +66,17 @@ export async function createMigrationCheckout(
 
 	const stripe = createStripeClient();
 	const base = paymentReturnBase();
+	const optionalItems = await buildMigrationLifetimeOptionalItems();
 
 	const session = await stripe.checkout.sessions.create({
 		mode: "payment",
 		payment_method_types: [...MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES],
 		line_items: [{ price: catalog.priceId, quantity: params.billableGb }],
+		...(optionalItems ? { optional_items: optionalItems } : {}),
 		success_url: `${base}/success?session_id={CHECKOUT_SESSION_ID}`,
 		cancel_url: `${base}/cancel?session_id={CHECKOUT_SESSION_ID}`,
 		metadata: {
-			pricing_model: "per_gb",
+			pricing_model: STRIPE_CHECKOUT_PRICING_MODEL_PER_GB,
 			billable_gb: String(params.billableGb),
 			total_bytes: String(params.totalBytes),
 			message_count: String(params.messageCount),
@@ -78,6 +84,7 @@ export async function createMigrationCheckout(
 			folder_paths_hash: hashFolderSelection(params.folderPaths),
 			free_migration_gb: String(catalog.freeLimitGb),
 			stripe_price_id: catalog.priceId,
+			...(optionalItems ? { lifetime_upsell: "1" } : {}),
 		},
 	});
 
@@ -142,11 +149,24 @@ async function completePaidCheckout(
 
 	markCheckoutPaid(sessionId);
 	removeCheckoutSession(sessionId);
+
+	let lifetimeLicense: string | undefined;
+	try {
+		const fulfilled = await fulfillLifetimeAddonOnServer(sessionId);
+		if (fulfilled.issued) {
+			lifetimeLicense = fulfilled.lifetimeLicense;
+			saveLifetimeLicense(fulfilled.lifetimeLicense);
+		}
+	} catch {
+		/* migration can still start; Lifetime can be fulfilled via server poll */
+	}
+
 	return {
 		paid: true,
 		billableGb: entry.billableGb,
 		sessionId,
 		launchTicket,
+		...(lifetimeLicense ? { lifetimeLicense } : {}),
 	};
 }
 

@@ -48,6 +48,7 @@ export type MailPortRPC = {
 						| "guess"
 						| "hosting";
 					verified: boolean;
+					accessProtocol: "imap" | "pop3";
 				};
 			};
 			listFolders: {

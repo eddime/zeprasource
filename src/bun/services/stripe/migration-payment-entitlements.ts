@@ -13,6 +13,7 @@ import {
 import { isLifetimeActive } from "../lifetime/lifetime-entitlement";
 import { getMigrationPricingCatalog } from "./migration-pricing-catalog";
 import { getStripeSecretKey, isStripeConfigured } from "./stripe-config";
+import { quantityForPriceId } from "./checkout-session-helpers";
 
 const ENTITLEMENT_TTL_MS = 45 * 60 * 1000;
 
@@ -100,26 +101,19 @@ export async function verifyStripeCheckoutSessionPaid(
 	const catalog = await getMigrationPricingCatalog();
 	const expectedPriceId = catalog.priceId;
 	const metadataPriceId = session.metadata?.stripe_price_id ?? null;
-	const lineItem = session.line_items?.data?.[0];
-	const paidPriceId =
-		typeof lineItem?.price === "object" && lineItem.price
-			? lineItem.price.id
-			: null;
+	const lineItems = session.line_items?.data ?? [];
 
-	if (expectedPriceId && paidPriceId && paidPriceId !== expectedPriceId) {
-		throw new Error("Stripe line item does not match the per-GB price.");
-	}
-	if (
-		expectedPriceId &&
-		metadataPriceId &&
-		metadataPriceId !== expectedPriceId
-	) {
-		throw new Error("Checkout metadata does not match the per-GB price.");
+	if (!expectedPriceId) {
+		throw new Error("Stripe per-GB price is not configured.");
 	}
 
-	const quantity = lineItem?.quantity ?? 0;
+	const quantity = quantityForPriceId(lineItems, expectedPriceId);
 	if (quantity !== expected.billableGb) {
 		throw new Error("Stripe quantity does not match billed gigabytes.");
+	}
+
+	if (metadataPriceId && metadataPriceId !== expectedPriceId) {
+		throw new Error("Checkout metadata does not match the per-GB price.");
 	}
 }
 

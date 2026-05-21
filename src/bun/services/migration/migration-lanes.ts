@@ -9,11 +9,16 @@ import {
 import {
 	appendMessage,
 	createImapClient,
-	fetchMessagesBatch,
 	flagsToArray,
 	safeCloseImapClient,
 	type FetchedMigrationMessage,
 } from "../imap/imap-client";
+import {
+	closeMailSource,
+	fetchSourceMessagesBatch,
+	openMailSource,
+	type MailSourceSession,
+} from "../mail/mail-source";
 import {
 	INTER_BATCH_PAUSE_MS,
 	MESSAGE_TRANSFER_TIMEOUT_MS,
@@ -221,10 +226,9 @@ async function runMigrationLane(options: {
 		hooks,
 	} = options;
 
-	const sourceClient = await createImapClient(sourceCreds);
+	const sourceSession = await openMailSource(sourceCreds);
 	const destClient = backupOnly ? null : await createImapClient(destCreds);
 	try {
-		await sourceClient.connect();
 		if (destClient) await destClient.connect();
 
 		let prefetchedBatch: Promise<FetchedMigrationMessage[]> | undefined;
@@ -239,10 +243,11 @@ async function runMigrationLane(options: {
 				i + 2 * MIGRATION_FETCH_BATCH_SIZE,
 			);
 			const currentFetch =
-				prefetchedBatch ?? fetchMessagesBatch(sourceClient, mapping.sourcePath, batchUids);
+				prefetchedBatch ??
+				fetchSourceMessagesBatch(sourceSession, mapping.sourcePath, batchUids);
 			prefetchedBatch =
 				nextBatchUids.length > 0
-					? fetchMessagesBatch(sourceClient, mapping.sourcePath, nextBatchUids)
+					? fetchSourceMessagesBatch(sourceSession, mapping.sourcePath, nextBatchUids)
 					: undefined;
 
 			let messages: FetchedMigrationMessage[];
@@ -256,7 +261,7 @@ async function runMigrationLane(options: {
 						migrationId,
 						mapping,
 						uid,
-						sourceClient,
+						sourceSession,
 						destClient,
 						transfer,
 						destMessageIds,
@@ -283,7 +288,7 @@ async function runMigrationLane(options: {
 						migrationId,
 						mapping,
 						uid,
-						sourceClient,
+						sourceSession,
 						destClient,
 						transfer,
 						destMessageIds,
@@ -317,8 +322,8 @@ async function runMigrationLane(options: {
 			}
 		}
 	} finally {
-		await safeCloseImapClient(sourceClient);
-		await safeCloseImapClient(destClient);
+		await closeMailSource(sourceSession);
+		if (destClient) await safeCloseImapClient(destClient);
 	}
 }
 
@@ -422,7 +427,7 @@ async function processUidWithRetries(options: {
 	migrationId: string;
 	mapping: FolderMapping;
 	uid: number;
-	sourceClient: Awaited<ReturnType<typeof createImapClient>>;
+	sourceSession: MailSourceSession;
 	destClient: Awaited<ReturnType<typeof createImapClient>> | null;
 	transfer: MigrationTransferConfig;
 	destMessageIds: Set<string>;
@@ -438,8 +443,8 @@ async function processUidWithRetries(options: {
 		await options.hooks.waitWhilePaused();
 		if (options.hooks.shouldStop()) return;
 
-		const batch = await fetchMessagesBatch(
-			options.sourceClient,
+		const batch = await fetchSourceMessagesBatch(
+			options.sourceSession,
 			options.mapping.sourcePath,
 			[options.uid],
 		);

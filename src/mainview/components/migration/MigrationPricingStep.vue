@@ -9,8 +9,7 @@ import AppDock from "../ui/AppDock.vue";
 
 const LIFETIME_COPY = {
 	kicker: "Own Zepra forever",
-	meta: "Unlimited runs · one-time purchase",
-	cta: "Get Lifetime instead",
+	meta: "Optional add-on in Stripe Checkout",
 } as const;
 
 const props = defineProps<{
@@ -23,7 +22,6 @@ const props = defineProps<{
 const emit = defineEmits<{
 	back: [];
 	continue: [];
-	lifetime: [];
 }>();
 
 const pricing = usePricingStore();
@@ -154,32 +152,11 @@ const canPay = computed(
 					<li>Only for the folders you selected</li>
 					<li>Copied locally — source mail is not deleted</li>
 					<li>Stripe opens in your browser, then migration starts here</li>
+					<li v-if="showLifetimeOffer">
+						{{ LIFETIME_COPY.kicker }} ({{ lifetimePrice }}) — {{ LIFETIME_COPY.meta }}
+					</li>
 				</ul>
 			</section>
-
-			<template v-if="showLifetimeOffer && !loading">
-				<p class="pricing-or" aria-hidden="true">or</p>
-				<section class="lifetime-nudge" aria-label="Zepra Lifetime">
-					<div class="lifetime-nudge-main">
-						<p class="lifetime-nudge-kicker">{{ LIFETIME_COPY.kicker }}</p>
-						<p class="lifetime-nudge-price">{{ lifetimePrice }}</p>
-						<p class="lifetime-nudge-meta">{{ LIFETIME_COPY.meta }}</p>
-					</div>
-					<button
-						v-if="pricing.lifetimeCheckoutReady"
-						type="button"
-						class="lifetime-nudge-cta"
-						:disabled="pricing.lifetimeLoading"
-						@click="emit('lifetime')"
-					>
-						{{
-							pricing.lifetimeLoading
-								? "Waiting…"
-								: LIFETIME_COPY.cta
-						}}
-					</button>
-				</section>
-			</template>
 
 			<p v-if="paymentError" class="inline-note error">{{ paymentError }}</p>
 		</div>

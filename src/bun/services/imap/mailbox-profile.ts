@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { resolveMailAccessProtocol } from "../../../shared/mail-access";
 import type { MailboxCredentials } from "../../../shared/types";
 import { getDatabase } from "../../db/database";
 import {
@@ -18,6 +19,7 @@ type StoredProfile = {
 	port: number;
 	secure: number;
 	auth_method: string;
+	access_protocol: string;
 	username: string | null;
 	credential_ref: string;
 };
@@ -42,6 +44,9 @@ function loadCredentialsFromProfile(row: StoredProfile): MailboxCredentials | nu
 		port: row.port,
 		secure: Boolean(row.secure),
 		authMethod: row.auth_method as MailboxCredentials["authMethod"],
+		accessProtocol: resolveMailAccessProtocol(
+			(row.access_protocol ?? "imap") as MailboxCredentials["accessProtocol"],
+		),
 		username: decryptString(row.username) ?? undefined,
 		password: secret,
 	};
@@ -65,8 +70,8 @@ export function saveMailboxProfile(
 
 	db.prepare(
 		`INSERT INTO mailbox_profiles (
-      id, role, provider, email, host, port, secure, auth_method, username, credential_ref, updated_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
+      id, role, provider, email, host, port, secure, auth_method, access_protocol, username, credential_ref, updated_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))`,
 	).run(
 		profileId,
 		role,
@@ -76,6 +81,7 @@ export function saveMailboxProfile(
 		credentials.port,
 		credentials.secure ? 1 : 0,
 		credentials.authMethod,
+		resolveMailAccessProtocol(credentials.accessProtocol),
 		encryptString(credentials.username ?? null),
 		credentialRef,
 	);

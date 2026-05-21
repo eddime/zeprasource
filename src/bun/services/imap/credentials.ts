@@ -70,6 +70,7 @@ export function normalizeMailboxCredentials(
 		port,
 		secure,
 		authMethod,
+		accessProtocol: credentials.accessProtocol,
 		username: credentials.username?.trim() || undefined,
 		password: credentials.password?.trim() || undefined,
 	};

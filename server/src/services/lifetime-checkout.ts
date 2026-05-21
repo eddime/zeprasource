@@ -2,6 +2,7 @@ import type Stripe from "stripe";
 import {
 	MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES,
 	STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME,
+	STRIPE_CHECKOUT_PRICING_MODEL_PER_GB,
 } from "../shared/stripe-checkout";
 import { paymentReturnBase } from "../config";
 import { createStripeClient, isStripeConfigured } from "../stripe-client";
@@ -14,6 +15,7 @@ import {
 	getLifetimeBySessionId,
 	storeLifetimeEntitlement,
 } from "./lifetime-store";
+import { quantityForPriceId } from "./checkout-session-helpers";
 
 export type LifetimeCheckoutSessionResponse = {
 	sessionId: string;
@@ -44,36 +46,45 @@ async function resolveLifetimePriceId(stripe: Stripe): Promise<string> {
 	return catalog.priceId;
 }
 
+async function retrieveSessionLineItems(
+	stripe: Stripe,
+	sessionId: string,
+): Promise<Stripe.LineItem[]> {
+	const full = await stripe.checkout.sessions.retrieve(sessionId, {
+		expand: ["line_items.data.price"],
+	});
+	return full.line_items?.data ?? [];
+}
+
 export async function verifyLifetimeStripeSession(
 	session: Stripe.Checkout.Session,
+	lineItems?: Stripe.LineItem[],
 ): Promise<void> {
 	if (session.payment_status !== "paid" || !session.id) {
 		throw new Error("Stripe checkout is not paid.");
 	}
-	if (session.metadata?.pricing_model !== STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME) {
-		throw new Error("Checkout is not a lifetime purchase.");
-	}
 
 	const stripe = createStripeClient();
 	const expectedPriceId = await resolveLifetimePriceId(stripe);
-	const metadataPriceId = session.metadata?.stripe_price_id ?? null;
-	if (metadataPriceId && metadataPriceId !== expectedPriceId) {
-		throw new Error("Stripe price does not match Zepra Lifetime.");
+	const items =
+		lineItems ?? (await retrieveSessionLineItems(stripe, session.id));
+	const lifetimeQty = quantityForPriceId(items, expectedPriceId);
+	if (lifetimeQty !== 1) {
+		throw new Error("Lifetime checkout must include exactly one Lifetime unit.");
 	}
 
-	const full = await stripe.checkout.sessions.retrieve(session.id, {
-		expand: ["line_items.data.price"],
-	});
-	const lineItem = full.line_items?.data?.[0];
-	const paidPriceId =
-		typeof lineItem?.price === "object" && lineItem.price
-			? lineItem.price.id
-			: null;
-	if (paidPriceId && paidPriceId !== expectedPriceId) {
-		throw new Error("Stripe line item does not match Zepra Lifetime.");
+	const model = session.metadata?.pricing_model;
+	const isDedicated = model === STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME;
+	const isMigrationBundle = model === STRIPE_CHECKOUT_PRICING_MODEL_PER_GB;
+	if (!isDedicated && !isMigrationBundle) {
+		throw new Error("Checkout is not a lifetime purchase.");
 	}
-	if ((lineItem?.quantity ?? 0) !== 1) {
-		throw new Error("Lifetime checkout must have quantity 1.");
+
+	if (isDedicated) {
+		const metadataPriceId = session.metadata?.stripe_price_id ?? null;
+		if (metadataPriceId && metadataPriceId !== expectedPriceId) {
+			throw new Error("Stripe price does not match Zepra Lifetime.");
+		}
 	}
 }
 
@@ -85,7 +96,14 @@ export async function issueLifetimeFromStripeSession(
 	const existing = getLifetimeBySessionId(session.id);
 	if (existing) return existing.license;
 
-	await verifyLifetimeStripeSession(session);
+	const stripe = createStripeClient();
+	const lineItems = await retrieveSessionLineItems(stripe, session.id);
+	const expectedPriceId = await resolveLifetimePriceId(stripe);
+	if (quantityForPriceId(lineItems, expectedPriceId) < 1) {
+		return null;
+	}
+
+	await verifyLifetimeStripeSession(session, lineItems);
 
 	const license = issueLifetimeLicense(session.id);
 	const payload = parseLifetimeLicense(license);
@@ -95,6 +113,32 @@ export async function issueLifetimeFromStripeSession(
 		jti: payload.jti,
 	});
 	return license;
+}
+
+/** Issue Lifetime license when customer added the optional item on a migration checkout. */
+export async function fulfillLifetimeAddonFromSessionId(
+	sessionId: string,
+): Promise<{ issued: true; lifetimeLicense: string } | { issued: false }> {
+	if (!isStripeConfigured()) {
+		throw new Error("Stripe is not configured on the server.");
+	}
+
+	const cached = getLifetimeBySessionId(sessionId);
+	if (cached) {
+		return { issued: true, lifetimeLicense: cached.license };
+	}
+
+	const stripe = createStripeClient();
+	const session = await stripe.checkout.sessions.retrieve(sessionId);
+	if (session.payment_status !== "paid") {
+		return { issued: false };
+	}
+
+	const license = await issueLifetimeFromStripeSession(session);
+	if (!license) {
+		return { issued: false };
+	}
+	return { issued: true, lifetimeLicense: license };
 }
 
 export async function createLifetimeCheckoutSession(): Promise<LifetimeCheckoutSessionResponse> {
@@ -181,8 +225,5 @@ export async function getLifetimeCheckoutStatus(
 export async function handleLifetimeCheckoutWebhook(
 	session: Stripe.Checkout.Session,
 ): Promise<void> {
-	if (session.metadata?.pricing_model !== STRIPE_CHECKOUT_PRICING_MODEL_LIFETIME) {
-		return;
-	}
 	await issueLifetimeFromStripeSession(session);
 }

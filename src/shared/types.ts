@@ -1,3 +1,5 @@
+import type { MailAccessProtocol } from "./mail-access";
+
 export type MailboxProvider = "generic" | "gmail" | "outlook" | "icloud";
 
 export type AuthMethod = "password";
@@ -9,6 +11,8 @@ export interface MailboxCredentials {
 	port: number;
 	secure: boolean;
 	authMethod: AuthMethod;
+	/** Set by autodiscovery — not shown in UI. Defaults to IMAP. */
+	accessProtocol?: MailAccessProtocol;
 	username?: string;
 	password?: string;
 }

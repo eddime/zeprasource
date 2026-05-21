@@ -3,7 +3,12 @@ import { paymentReturnBase } from "../config";
 import { hashFolderSelection } from "../shared/migration-payment";
 import { assertBillableGbMatchesEstimate } from "../shared/pricing";
 import type { MigrationCheckoutCreateBody } from "../shared/stripe-checkout";
-import { MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES } from "../shared/stripe-checkout";
+import {
+	MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES,
+	STRIPE_CHECKOUT_PRICING_MODEL_PER_GB,
+} from "../shared/stripe-checkout";
+import { buildMigrationLifetimeOptionalItems } from "./migration-checkout-optional";
+import { issueLifetimeFromStripeSession } from "./lifetime-checkout";
 import { createStripeClient, isStripeConfigured } from "../stripe-client";
 import { issueMigrationLaunchTicket } from "./launch-ticket";
 import { getMigrationPricingCatalog } from "./pricing-catalog";
@@ -28,6 +33,8 @@ export type CheckoutStatusResponse =
 			sessionId: string;
 			billableGb: number;
 			launchTicket: string;
+			/** Present when the customer added Zepra Lifetime in the same checkout. */
+			lifetimeLicense?: string;
 	  }
 	| {
 			status: "expired" | "cancelled";
@@ -79,14 +86,16 @@ export async function createCheckoutSession(
 	const folderPathsHash = hashFolderSelection(body.folderPaths);
 	const base = paymentReturnBase();
 
+	const optionalItems = await buildMigrationLifetimeOptionalItems();
 	const session = await stripe.checkout.sessions.create({
 		mode: "payment",
 		payment_method_types: [...MIGRATION_CHECKOUT_PAYMENT_METHOD_TYPES],
 		line_items: [{ price: catalog.priceId, quantity: body.billableGb }],
+		...(optionalItems ? { optional_items: optionalItems } : {}),
 		success_url: `${base}/success?session_id={CHECKOUT_SESSION_ID}`,
 		cancel_url: `${base}/cancel?session_id={CHECKOUT_SESSION_ID}`,
 		metadata: {
-			pricing_model: "per_gb",
+			pricing_model: STRIPE_CHECKOUT_PRICING_MODEL_PER_GB,
 			billable_gb: String(body.billableGb),
 			total_bytes: String(body.totalBytes),
 			message_count: String(body.messageCount),
@@ -94,6 +103,7 @@ export async function createCheckoutSession(
 			folder_paths_hash: folderPathsHash,
 			free_migration_gb: String(catalog.freeLimitGb),
 			stripe_price_id: catalog.priceId,
+			...(optionalItems ? { lifetime_upsell: "1" } : {}),
 		},
 	});
 
@@ -102,6 +112,13 @@ export async function createCheckoutSession(
 	}
 
 	return { sessionId: session.id, checkoutUrl: session.url };
+}
+
+async function lifetimeLicenseFromSession(
+	session: Stripe.Checkout.Session,
+): Promise<string | undefined> {
+	const license = await issueLifetimeFromStripeSession(session);
+	return license ?? undefined;
 }
 
 async function issueTicketFromStripeSession(
@@ -166,11 +183,13 @@ export async function getCheckoutStatus(
 				sessionId,
 			};
 		}
+		const lifetimeLicense = await lifetimeLicenseFromSession(session);
 		return {
 			status: "paid",
 			sessionId,
 			billableGb: meta.billableGb,
 			launchTicket: cached,
+			...(lifetimeLicense ? { lifetimeLicense } : {}),
 		};
 	}
 
@@ -198,11 +217,13 @@ export async function getCheckoutStatus(
 				sessionId,
 			};
 		}
+		const lifetimeLicense = await lifetimeLicenseFromSession(session);
 		return {
 			status: "paid",
 			sessionId,
 			billableGb: meta.billableGb,
 			launchTicket,
+			...(lifetimeLicense ? { lifetimeLicense } : {}),
 		};
 	}
 
