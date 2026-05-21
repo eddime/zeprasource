@@ -373,7 +373,7 @@ export async function executeMigration(
 
 	logger.info(
 		"migration",
-		`Transfer profile ${profile.id} (single source session, batch ${profile.fetchBatchSize}${useServerSideCopy ? ", server COPY" : ""}${backupOnly ? "" : ", rolling pipeline"})`,
+		`Transfer profile ${profile.id} (single source session, batch ${profile.fetchBatchSize}${useServerSideCopy ? ", server COPY" : ""}${backupOnly ? "" : ", rolling+micro pipeline"})`,
 		migrationId,
 	);
 

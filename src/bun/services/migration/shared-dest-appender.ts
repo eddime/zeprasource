@@ -1,7 +1,7 @@
 import type { ImapFlow } from "imapflow";
 import type { MailboxCredentials } from "../../../shared/types";
 import {
-	appendMessagesBatch,
+	appendMessagesOptimized,
 	type AppendPayload,
 } from "../imap/imap-append-batch";
 import { connectImapClient, safeCloseImapClient } from "../imap/imap-client";
@@ -79,7 +79,7 @@ export class SharedDestAppender {
 			MESSAGE_TRANSFER_TIMEOUT_MS * Math.max(1, Math.ceil(messages.length / 5)),
 		);
 		await withTimeout(
-			appendMessagesBatch(this.client, folderPath, messages),
+			appendMessagesOptimized(this.client, folderPath, messages),
 			batchTimeoutMs,
 			`Append batch to ${folderPath}`,
 		);

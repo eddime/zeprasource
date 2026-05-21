@@ -863,9 +863,17 @@ async function transferFolderTurboStaging(ctx: TransferContext, pendingUids: num
 	}
 
 	if (phase === "ingest") {
-		const noopQueue = new TransferBatchQueue<number[]>(1);
-		await runStageLane({ ctx, uids: fetchUids, uploadQueue: noopQueue });
-		noopQueue.close();
+		const uploadQueue = new TransferBatchQueue<number[]>(ctx.transfer.pipelineQueueDepth);
+		const uploadWorker = runUploadWorker(ctx, staging, uploadQueue);
+		const batchSize = ctx.transfer.fetchBatchSize;
+		const stagedToDeliver = stagedUidsForDeliver(ctx, resumeStaged);
+		for (let i = 0; i < stagedToDeliver.length; i += batchSize) {
+			const batch = stagedToDeliver.slice(i, i + batchSize);
+			if (batch.length > 0) await uploadQueue.push(batch);
+		}
+		await runStageLane({ ctx, uids: fetchUids, uploadQueue });
+		uploadQueue.close();
+		await uploadWorker;
 		return;
 	}
 

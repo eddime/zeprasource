@@ -30,6 +30,8 @@ export async function appendMessagesBatch(
 	}
 }
 
+export { appendMessagesOptimized, serverSupportsMultiAppend } from "./imap-multiappend";
+
 export function toAppendPayload(
 	msg: FetchedMigrationMessage,
 	preserveFlags: boolean,
